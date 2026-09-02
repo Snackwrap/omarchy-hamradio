@@ -93,6 +93,39 @@ eq("first band name", solar.bands[0].band, "80m-40m")
 eq("day and night are both captured", solar.bands[1].day + "/" + solar.bands[1].night, "Good/Fair")
 eq("empty input is null", H.parseSolar(""), null)
 
+// The band name comes straight out of the remote document and is used as a map
+// key, so a group calling itself __proto__ must land nowhere near
+// Object.prototype.
+const hostile = `<solar><calculatedconditions>
+  <band name="__proto__" time="day">Good</band>
+  <band name="__proto__" time="night">Good</band>
+  <band name="constructor" time="day">Poor</band>
+</calculatedconditions></solar>`
+const before = ({}).day
+const evil = H.parseSolar(hostile)
+check("Object.prototype is untouched", ({}).day === before, `got ${({}).day}`)
+// The character allowlist scrubs the underscores, so the dangerous key never
+// exists at all rather than merely being inert.
+check("no __proto__ key survives", !evil.bands.some(b => b.band === "__proto__"),
+      JSON.stringify(evil.bands.map(b => b.band)))
+eq("it is kept as a scrubbed name", evil.bands[0].band, "proto")
+eq("...carrying its own grade", evil.bands[0].day, "Good")
+check("constructor is likewise just a name", evil.bands.some(b => b.band === "constructor"))
+
+// A document with far more groups than anyone publishes stops at the cap
+// rather than being collected and truncated afterwards.
+let many = "<solar>"
+for (let i = 0; i < 500; i++) many += `<band name="b${i}" time="day">Good</band>`
+many += "</solar>"
+check("group count is capped at ingest", H.parseSolar(many).bands.length <= 12,
+      `got ${H.parseSolar(many).bands.length}`)
+// Entities are deliberately not decoded — the scrubber's job is to make the
+// name safe to key and display, not to reconstruct what was meant. What
+// matters is that nothing markup-shaped survives it.
+const scrubbed = H.parseSolar('<solar><band name="4&lt;b&gt;0m" time="day">Go&amp;od</band></solar>').bands[0]
+check("no markup characters survive a name", !/[<>&;]/.test(scrubbed.band), scrubbed.band)
+check("nor a grade", !/[<>&;]/.test(scrubbed.day), scrubbed.day)
+
 console.log("\n# which half of the table applies")
 const daytime = H.bandsForNow(solar.bands, true)
 const night = H.bandsForNow(solar.bands, false)

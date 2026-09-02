@@ -184,15 +184,30 @@ function parseSolar(text) {
   var raw = String(text || "")
   if (raw.length === 0) return null
 
+  // The band table is keyed by a name that comes straight out of the remote
+  // document. A plain object inherits from Object.prototype, so a group calling
+  // itself "__proto__" would have its day/night assignment land on the shared
+  // prototype rather than in the map. A null prototype removes the question,
+  // and names and grades are normalised and capped before they are used as
+  // keys or values at all.
+  var MAX_GROUPS = 12
   var bands = []
-  var re = /<band\s+name="([^"]+)"\s+time="([^"]+)"\s*>([^<]*)<\/band>/gi
+  var byName = Object.create(null)
+  var re = /<band\s+name="([^"]{1,32})"\s+time="([^"]{1,16})"\s*>([^<]{0,32})<\/band>/gi
   var m
-  var byName = {}
   while ((m = re.exec(raw)) !== null) {
-    var name = m[1].replace(/^\s+|\s+$/g, "")
-    var when = m[2].toLowerCase()
-    var grade = m[3].replace(/^\s+|\s+$/g, "")
-    if (!byName[name]) { byName[name] = { band: name, day: "", night: "" }; bands.push(byName[name]) }
+    var name = m[1].replace(/[^A-Za-z0-9 \-]/g, "").replace(/^\s+|\s+$/g, "").slice(0, 24)
+    if (name === "") continue
+    var when = m[2].toLowerCase().replace(/[^a-z]/g, "")
+    var grade = m[3].replace(/[^A-Za-z ]/g, "").replace(/^\s+|\s+$/g, "").slice(0, 12)
+    if (!byName[name]) {
+      // Stop at the cap rather than collecting everything and truncating
+      // afterwards; a document with ten thousand groups should cost ten
+      // thousand regex steps, not ten thousand objects.
+      if (bands.length >= MAX_GROUPS) continue
+      byName[name] = { band: name, day: "", night: "" }
+      bands.push(byName[name])
+    }
     if (when === "day") byName[name].day = grade
     else if (when === "night") byName[name].night = grade
   }

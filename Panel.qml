@@ -95,13 +95,28 @@ Panel {
   // elements that show them are pinned to PlainText besides.
   function safe(v, limit) {
     var text = String(v === null || v === undefined ? "" : v)
-    text = text.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/^\s+|\s+$/g, "")
+    text = text.replace(/[\u0000-\u001F\u007F\u0080-\u009F]+/g, " ")
+                   // Bidi and other invisible format controls can reorder or
+                   // hide what is shown without changing what was checked.
+                   .replace(/[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g, "").replace(/^\s+|\s+$/g, "")
     var cap = limit || maxFieldChars
     return text.length > cap ? text.slice(0, cap) + "\u2026" : text
   }
 
   // The bar pill and its tooltip render in Text elements the shell owns, where
   // textFormat is not ours to set, so the markup comes out of the string.
+  // A tooltip is deliberately several lines, and safe() strips newlines along
+  // with every other C0 control — so the boundary is applied per line and the
+  // structure is rebuilt, rather than the whole thing being flattened.
+  function safeBareLines(v, perLine, maxLines) {
+    var lines = String(v === null || v === undefined ? "" : v).split("\n")
+    var out = []
+    for (var i = 0; i < lines.length && out.length < (maxLines || 12); i++) {
+      out.push(safeBare(lines[i], perLine || 80))
+    }
+    return out.join("\n")
+  }
+
   function safeBare(v, limit) { return safe(v, limit).replace(/[<>&]/g, " ") }
 
   function boundedList(v, cap) {
@@ -228,7 +243,9 @@ Panel {
   readonly property string gradeColor: best ? gradeFor(best.grade) : ""
 
   // ---- Bar pill ---------------------------------------------------------
-  readonly property string label: {
+  readonly property string label: safeBare(rawLabel, 40)
+
+  readonly property string rawLabel: {
     if (!solar) return glyph
     if (pillContent === "sfi") return glyph + "  SFI " + (isFinite(solar.sfi) ? solar.sfi : "--")
     if (pillContent === "k") return glyph + "  K " + (isFinite(solar.k) ? solar.k : "--")
@@ -236,7 +253,12 @@ Panel {
     return glyph + "  " + (best ? safeBare(best.band, 12) : "--")
   }
 
-  readonly property string tooltip: {
+  // Both of these render in Text elements the shell owns, where this plugin
+  // cannot set textFormat — so the boundary is applied to the finished string
+  // rather than trusting that every piece was clean on the way in.
+  readonly property string tooltip: safeBareLines(rawTooltip, 80, 10)
+
+  readonly property string rawTooltip: {
     if (lastError !== "") return "Ham radio — " + lastError
     if (!solar) return "Ham radio — loading"
     var parts = []
