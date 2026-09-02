@@ -173,9 +173,18 @@ if (!process.argv.includes("--offline")) {
   try {
     const spots = await get("https://api.pota.app/spot/activator")
     check("POTA returned spots", Array.isArray(spots) && spots.length > 0, `${spots.length} spots`)
-    const bad = spots.map(s => H.normalisePotaSpot(s)).filter(s => s && s.freq > 0 && s.band === "")
-    check("every spotted frequency lands in a band", bad.length === 0,
-          bad.length ? `unmapped: ${bad.slice(0, 4).map(s => s.freq).join(", ")}` : "")
+    // Operators mistype frequencies and the feed passes them straight through
+    // — a spot at 700.5 MHz is a fat finger, not a band we are missing. The
+    // right behaviour is to refuse to map it, so this asserts that the great
+    // majority land in a band and reports the ones that do not rather than
+    // failing on somebody else's typo.
+    const mapped = spots.map(s => H.normalisePotaSpot(s)).filter(s => s && s.freq > 0)
+    const unmapped = mapped.filter(s => s.band === "")
+    check("nearly every spotted frequency lands in a band",
+          mapped.length > 0 && unmapped.length / mapped.length < 0.1,
+          unmapped.length ? `${unmapped.length}/${mapped.length} out of band: `
+                            + unmapped.slice(0, 4).map(s => (s.freq / 1000).toFixed(3) + " MHz").join(", ")
+                          : `${mapped.length}/${mapped.length}`)
   } catch (e) { console.log(`  skip  POTA unavailable (${e.message})`) }
 }
 
