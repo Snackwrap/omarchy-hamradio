@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "id": "com.leafbox.hamradio",
+  "name": "Ham Radio",
+  "version": "0.1.0",
+  "author": "Robert (leafbox)",
+  "license": "MIT",
+  "homepage": "https://github.com/Snackwrap/omarchy-hamradio",
+  "repository": "https://github.com/Snackwrap/omarchy-hamradio",
+  "description": "HF band conditions in the Omarchy bar: which band is open now, day and night, with the solar and geomagnetic numbers behind it, your grey-line windows on a 24-hour strip, and live POTA and SOTA activations sorted by distance from your grid square.",
+  "keywords": ["ham radio", "amateur radio", "hf", "propagation", "pota", "sota", "solar", "grey line", "bar", "quickshell"],
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Ham Radio",
+    "description": "Band conditions, grey-line timing and live POTA/SOTA spots.",
+    "category": "Info",
+    "aliases": ["ham", "amateur radio", "hf", "propagation", "pota", "sota", "bands"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "grid": "",
+      "latitude": "",
+      "longitude": "",
+      "pillContent": "band",
+      "spotSource": "both",
+      "spotBands": "",
+      "defaultTab": "bands",
+      "greyLineAlert": false,
+      "timeFormat": "local",
+      "animations": true,
+      "popupPosition": "icon",
+      "debugGeometry": false
+    },
+    "schema": [
+      {
+        "key": "grid",
+        "type": "string",
+        "label": "Maidenhead locator (e.g. IO91px — blank: use your Omarchy weather location)",
+        "defaultValue": ""
+      },
+      {
+        "key": "latitude",
+        "type": "string",
+        "label": "Latitude (overrides the locator)",
+        "defaultValue": ""
+      },
+      {
+        "key": "longitude",
+        "type": "string",
+        "label": "Longitude (overrides the locator)",
+        "defaultValue": ""
+      },
+      {
+        "key": "pillContent",
+        "type": "enum",
+        "label": "Bar pill shows",
+        "options": [
+          { "value": "band", "label": "Best band open now" },
+          { "value": "sfi", "label": "Solar flux" },
+          { "value": "k", "label": "K index" },
+          { "value": "spots", "label": "Number of spots" }
+        ],
+        "defaultValue": "band"
+      },
+      {
+        "key": "spotSource",
+        "type": "enum",
+        "label": "Spots from",
+        "options": [
+          { "value": "both", "label": "POTA and SOTA" },
+          { "value": "pota", "label": "POTA only" },
+          { "value": "sota", "label": "SOTA only" },
+          { "value": "off", "label": "Do not fetch spots" }
+        ],
+        "defaultValue": "both"
+      },
+      {
+        "key": "spotBands",
+        "type": "string",
+        "label": "Only show these bands, comma separated (e.g. 40m,20m — blank: all)",
+        "defaultValue": ""
+      },
+      {
+        "key": "defaultTab",
+        "type": "enum",
+        "label": "Default tab",
+        "options": [
+          { "value": "bands", "label": "Bands" },
+          { "value": "spots", "label": "Spots" },
+          { "value": "greyline", "label": "Grey line" }
+        ],
+        "defaultValue": "bands"
+      },
+      {
+        "key": "greyLineAlert",
+        "type": "boolean",
+        "label": "Notify when a grey-line window opens",
+        "defaultValue": false
+      },
+      {
+        "key": "timeFormat",
+        "type": "enum",
+        "label": "Times shown as",
+        "options": [
+          { "value": "local", "label": "Local time" },
+          { "value": "utc", "label": "UTC" }
+        ],
+        "defaultValue": "local"
+      },
+      {
+        "key": "animations",
+        "type": "boolean",
+        "label": "Animate the band table and the grey-line strip",
+        "defaultValue": true
+      },
+      {
+        "key": "popupPosition",
+        "type": "enum",
+        "label": "Popup position",
+        "options": [
+          { "value": "icon", "label": "Under the bar icon" },
+          { "value": "center", "label": "Centered on the bar" }
+        ],
+        "defaultValue": "icon"
+      }
+    ]
+  }
+}
