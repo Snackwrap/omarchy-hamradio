@@ -103,6 +103,28 @@ eq("best band at night", H.bestBand(solar.bands, false).band, "80m-40m")
 eq("grades rank", H.gradeRank("Good") > H.gradeRank("Fair") && H.gradeRank("Fair") > H.gradeRank("Poor"), true)
 eq("an unknown grade ranks below Poor", H.gradeRank("Banana"), -1)
 
+console.log("\n# bands against the groups that are graded")
+// hamqsl grades four groups, not nine bands; the mapping is read out of the
+// group's own label so it follows an upstream regrouping.
+eq("a group names its members", H.groupCovers("80m-40m").join(","), "80m,40m")
+eq("spacing does not matter", H.groupCovers("17m - 15m").join(","), "17m,15m")
+eq("a single-band group works", H.groupCovers("6m").join(","), "6m")
+eq("40m takes the 80m-40m verdict, by day", H.gradeForBand(solar.bands, "40m", true), "Good")
+eq("...and by night", H.gradeForBand(solar.bands, "20m", false), "Fair")
+eq("10m is Poor", H.gradeForBand(solar.bands, "10m", true), "Poor")
+// 160m and 60m are in no published group, and borrowing a neighbour's verdict
+// would be a guess dressed as a forecast.
+eq("160m has no forecast", H.gradeForBand(solar.bands, "160m", true), "")
+eq("60m has no forecast", H.gradeForBand(solar.bands, "60m", true), "")
+eq("nonsense has no forecast", H.gradeForBand(solar.bands, "banana", true), "")
+
+const hf = H.hfBands()
+eq("the HF list starts at 160m", hf[0].band, "160m")
+eq("...and ends at 10m", hf[hf.length - 1].band, "10m")
+check("6m is not in the HF list", hf.every(b => b.band !== "6m"))
+eq("a band knows its edges", H.bandSpan("20m").from + "-" + H.bandSpan("20m").to, "14000-14350")
+eq("an unknown band has none", H.bandSpan("nope"), null)
+
 console.log("\n# what a disturbed field means")
 eq("quiet", H.geomagneticNote(1), "quiet")
 eq("unsettled", H.geomagneticNote(4), "unsettled — polar paths degraded")

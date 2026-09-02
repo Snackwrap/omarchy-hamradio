@@ -25,9 +25,23 @@ while len(fields) < 3:
 w, h, _ = fields
 img = np.frombuffer(out[pos + 1:], dtype=np.uint8).reshape(h, w, 3).astype(int)
 
-edges = np.concatenate([img[0, :, :], img[-1, :, :], img[:, 0, :], img[:, -1, :]])
-spread = edges.std(axis=0).max()
-if spread > 26:
-    print(f"not the popup: border varies by {spread:.1f}")
+# Look for a uniform ring anywhere in the first few pixels rather than at one
+# fixed inset. The popup's border is one logical pixel, which lands on a
+# different device row depending on the output scale, and the very edge is a
+# blend of border and background — so the test is "is any of these rings
+# essentially one colour", which a window underneath never satisfies.
+best = None
+for inset in range(0, 6):
+    if img.shape[0] <= inset * 2 + 4 or img.shape[1] <= inset * 2 + 4:
+        break
+    end = -inset or None
+    ring = np.concatenate([img[inset, inset:end, :], img[-1 - inset, inset:end, :],
+                           img[inset:end, inset, :], img[inset:end, -1 - inset, :]])
+    spread = ring.std(axis=0).max()
+    if best is None or spread < best:
+        best = spread
+
+if best is None or best > 12:
+    print(f"not the popup: no uniform border (best ring varies by {best})")
     sys.exit(1)
-print(f"popup border is uniform (sigma {spread:.1f})")
+print(f"popup border found (ring sigma {best:.1f})")

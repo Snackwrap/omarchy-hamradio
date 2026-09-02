@@ -11,13 +11,17 @@ the location your Omarchy weather widget already knows.
 
 ## The three tabs
 
-- **Bands** — N0NBH's verdict for each band group, day and night side by side,
-  with the half that is actually in force picked out and the other dimmed. Below
-  it the numbers that produced it: solar flux, sunspot number, A and K, the X-ray
-  class, foF2 and the signal-noise estimate.
-- **Spots** — live POTA and SOTA activations, newest first, with the band
-  derived from the spotted frequency rather than trusted from the feed. Filter to
-  the bands you can actually work.
+- **Bands** — the HF spectrum from 1.8 to 30 MHz, every band drawn at its real
+  place and filled with the grade in force, and the frequencies people are
+  working right now as ticks on the same axis. Under it, N0NBH's verdict for
+  each band group day and night side by side, with the half actually in force
+  picked out and the other dimmed; then the numbers that produced it — solar
+  flux, sunspot number, A and K, the X-ray class, foF2 and the signal-noise
+  estimate.
+- **Spots** — live POTA and SOTA activations, newest first, each row coloured by
+  what that band is doing right now, with the band derived from the spotted
+  frequency rather than trusted from the feed. Filter it to the bands you can
+  actually work.
 - **Grey line** — today as a strip: night dark, day light, and the two grey-line
   windows picked out in amber, with a marker for now. Sunrise, sunset, and how
   long until the next window.
@@ -52,8 +56,10 @@ against itself:
 - **The solar feed** against a fixture, including that a MUF reported as `NoRpt`
   must not become a number.
 - Then, live: the real feed has to parse, the flux has to be plausible, every
-  band grade has to be a word we know, and every spotted frequency has to land in
-  a band.
+  band grade has to be a word we know, and nearly every spotted frequency has to
+  land in a band. Only *nearly* — operators mistype frequencies and the feed
+  passes them through, so a spot at 700.5 MHz is a fat finger rather than a band
+  we are missing, and refusing to map it is the right behaviour.
 
 ```bash
 node tools/test-ham.mjs            # includes the live checks
@@ -114,6 +120,10 @@ omarchy restart shell
 - `BandTable.qml` — the day/night matrix. Grades are drawn as bar lengths as
   well as colours, because three lengths read faster than three words and the
   colour then only has to confirm it.
+- `Spectrum.qml` — the frequency axis. Logarithmic, because linear would give
+  10m nearly half the width and squeeze 160m through 40m into the first fifth.
+  A band with no published grade is drawn as an outline rather than borrowing a
+  neighbour's verdict — 160m behaves nothing like 40m.
 - `GreyLineStrip.qml` — today as a 24-hour strip.
 - `tools/capture-preview.sh` — regenerates the listing card. The popup lives in
   a fullscreen layer surface, so the compositor cannot report where it is; with

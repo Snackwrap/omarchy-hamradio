@@ -187,6 +187,17 @@ Panel {
     return Ham.sortSpots(all)
   }
 
+  // Frequencies only, for the spectrum's ticks — the spot list itself is
+  // already capped, and this follows whatever filter is applied to it.
+  readonly property var spotFreqs: {
+    var out = []
+    var list = spots
+    for (var i = 0; i < list.length && out.length < 200; i++) {
+      if (isFinite(list[i].freq)) out.push(list[i].freq)
+    }
+    return out
+  }
+
   function gradeFor(g) {
     switch (String(g || "")) {
     case "Good": return "#3fb950"
@@ -384,15 +395,25 @@ Panel {
   }
 
   function playForView() {
-    if (view === "bands" && bandTable) bandTable.play()
+    if (view === "bands") {
+      if (spectrum) spectrum.play()
+      if (bandTable) bandTable.play()
+    }
     else if (view === "greyline" && greyStrip) greyStrip.play()
   }
   onViewChanged: if (opened) Qt.callLater(playForView)
 
   Timer { id: geometryTimer; interval: 1200; onTriggered: root.reportGeometry() }
+  // Re-arm on *any* geometry change, not only height. The panel clamps its own
+  // x against the screen edge once it knows its final width, so a rect reported
+  // before that lands is a couple of hundred pixels out — and the crop then
+  // photographs whatever is beside the popup instead.
   Connections {
     target: root.debugGeometry ? root.panelFrame : null
     function onHeightChanged() { geometryTimer.restart() }
+    function onWidthChanged() { geometryTimer.restart() }
+    function onXChanged() { geometryTimer.restart() }
+    function onYChanged() { geometryTimer.restart() }
   }
 
   // The popup lives in a fullscreen layer surface, so nothing outside the shell
@@ -539,10 +560,31 @@ Panel {
           spacing: Style.space(8)
 
           PanelSectionHeader {
-            text: root.solar ? ("UPDATED " + root.safe(root.solar.updated, 32)) : "BAND CONDITIONS"
+            text: {
+              if (!root.solar) return "BAND CONDITIONS"
+              var head = "UPDATED " + root.safe(root.solar.updated, 32)
+              return root.spotFreqs.length
+                ? head + "  \u00b7  " + root.spotFreqs.length + " ON THE AIR" : head
+            }
             foreground: Color.popups.text
             font.letterSpacing: Style.space(2)
           }
+
+          Spectrum {
+            id: spectrum
+            width: parent.width
+            bands: root.solar ? root.solar.bands : []
+            spotFreqs: root.spotFreqs
+            isDay: root.isDay
+            gradeColor: root.gradeFor
+            inkColor: Color.popups.text
+            mutedColor: Color.muted
+            fontFamily: Style.font.family
+            labelSize: Style.space(10)
+            animate: root.animOn
+          }
+
+          PanelSeparator { foreground: Color.popups.text }
 
           BandTable {
             id: bandTable
@@ -631,8 +673,15 @@ Panel {
                 width: Style.space(3)
                 height: Style.space(15)
                 radius: Style.space(2)
-                color: sp.modelData.source === "SOTA" ? Color.accent : root.gradeFor("Good")
-                opacity: 0.8
+                // The colour of the band's current grade, so the list says
+                // whether a spot is workable without a trip to the Bands tab.
+                // A band with no published forecast stays neutral.
+                color: {
+                  var g = Ham.gradeForBand(root.solar ? root.solar.bands : [],
+                                           sp.modelData.band, root.isDay)
+                  return g !== "" ? root.gradeFor(g) : Color.muted
+                }
+                opacity: 0.85
                 anchors.verticalCenter: parent.verticalCenter
               }
               Text {

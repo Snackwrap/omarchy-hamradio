@@ -11,9 +11,9 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TABS = ROOT / "assets" / "tabs"
 
-# Every capture is 770 wide but its height follows its content, so crop them all
+# Every capture is 672 wide but its height follows its content, so crop them all
 # to a common band from the top.
-BAND = 688
+BAND = 592
 
 PANELS = [
     ("bands.png",    "BANDS",     "day and night, and which one is in force"),
@@ -24,7 +24,7 @@ PANELS = [
 
 def uri(name):
     out = subprocess.run(
-        ["magick", str(TABS / name), "-crop", f"770x{BAND}+0+0", "+repage", "png:-"],
+        ["magick", str(TABS / name), "-crop", f"672x{BAND}+0+0", "+repage", "png:-"],
         check=True, capture_output=True).stdout
     return "data:image/png;base64," + base64.b64encode(out).decode()
 

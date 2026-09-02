@@ -376,3 +376,47 @@ function formatAge(minutes) {
   var h = Math.floor(m / 60)
   return h + "h" + (Math.round(m - h * 60) ? Math.round(m - h * 60) + "m" : "")
 }
+
+// ---- Bands against the groups that are actually graded ---------------------
+
+// N0NBH publishes a verdict for four *groups* ("80m-40m", "30m-20m" ...), not
+// for the nine HF bands. Rather than hard-code that mapping, read the band
+// names out of the group's own label: if the grouping ever changes upstream,
+// this follows it instead of quietly mis-colouring a band. Bands with no group
+// — 160m and 60m, today — have no forecast, and saying so is better than
+// borrowing a neighbour's.
+function groupCovers(groupName) {
+  var found = String(groupName || "").toLowerCase().match(/\d+\s*(?:m|cm)/g)
+  if (!found) return []
+  var out = []
+  for (var i = 0; i < found.length; i++) out.push(found[i].replace(/\s+/g, ""))
+  return out
+}
+
+function gradeForBand(bands, bandName, isDay) {
+  var want = String(bandName || "").toLowerCase()
+  if (want === "") return ""
+  for (var i = 0; i < (bands || []).length; i++) {
+    var covers = groupCovers(bands[i].band)
+    if (covers.indexOf(want) < 0) continue
+    return isDay ? bands[i].day : bands[i].night
+  }
+  return ""
+}
+
+// The HF bands, in order, for anything that draws a frequency axis.
+function hfBands() {
+  var out = []
+  for (var i = 0; i < BANDS.length; i++) {
+    if (BANDS[i].from >= 1800 && BANDS[i].to <= 29700) out.push(BANDS[i])
+  }
+  return out
+}
+
+function bandSpan(bandName) {
+  var want = String(bandName || "").toLowerCase()
+  for (var i = 0; i < BANDS.length; i++) {
+    if (BANDS[i].band.toLowerCase() === want) return BANDS[i]
+  }
+  return null
+}
