@@ -70,7 +70,10 @@ Panel {
   readonly property int maxFieldChars: 64
 
   function fetchArgs(seconds, url) {
-    return ["curl", "-fsS", "-A", ua,
+    // -q must come first: without it curl reads ~/.curlrc, which could add a
+    // proxy, an output file, or --insecure to what is otherwise a fixed
+    // request.
+    return ["curl", "-q", "-fsS", "-A", ua,
             "--proto", "=https",
             "--max-time", String(seconds),
             "--max-filesize", String(maxResponseBytes),
@@ -129,9 +132,25 @@ Panel {
   Timer { id: weatherReadTimer; interval: 250; onTriggered: weatherReader.running = true }
   Timer { interval: 1500; running: true; onTriggered: weatherReader.running = true }
 
+  // Opening with O_NOFOLLOW and O_NONBLOCK means a symlink cannot redirect the
+  // read and a planted FIFO cannot block it, and every check is made through
+  // that same descriptor rather than on the path, so there is no window between
+  // the check and the read. perl rather than python because Omarchy depends on
+  // perl and does not depend on python.
+  readonly property string safeReadScript:
+    "use strict; use Fcntl qw(:DEFAULT :mode);" +
+    "sysopen(my $fh, $ARGV[0], O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;" +
+    "my @s = stat($fh) or exit 1;" +
+    "exit 1 unless S_ISREG($s[2]);" +
+    "exit 1 unless $s[4] == $<;" +
+    "exit 1 if $s[3] > 1;" +
+    "exit 1 if $s[7] > 8192;" +
+    "exit 1 if ($s[2] & 0022);" +
+    "my $buf = \"\"; sysread($fh, $buf, 8192); print $buf;"
+
   Process {
     id: weatherReader
-    command: ["timeout", "2", "head", "-c", "8192", "--", root.weatherPath]
+    command: ["perl", "-e", root.safeReadScript, root.weatherPath]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -257,26 +276,53 @@ Panel {
   readonly property var guardLimits: [20, 20, 20, 4]
   property var guardStarted: [0, 0, 0, 0]
 
-  function stamp(i, proc) {
+  property var pendingCmd: [null, null, null]
+
+  // Start now if the slot is idle, otherwise queue: a superseded process can
+  // still flush its collector after `running = false`, and if the replacement
+  // had already rewritten the stamps that stale output would validate against
+  // the new request's checks. onExited starts the queued run, by which point
+  // the old collector has already run and been rejected.
+  function launch(i, cmd) {
+    var pc = pendingCmd; pc[i] = cmd; pendingCmd = pc
+    var proc = guardedProcs[i]
+    if (proc.running) { proc.running = false; return }
+    startPending(i)
+  }
+
+  function startPending(i) {
+    var started = guardStarted; started[i] = 0; guardStarted = started
+    var cmd = pendingCmd[i]
+    if (!cmd) return
+    var pc = pendingCmd; pc[i] = null; pendingCmd = pc
     var g = procGen; g[i] = fetchGen; procGen = g
+    var proc = guardedProcs[i]
+    proc.command = cmd
+    // Bound to the launch, not to the watchdog's next tick — otherwise a quick
+    // completion followed by a new run inherits the old run's age.
+    started = guardStarted; started[i] = Date.now(); guardStarted = started
     proc.running = true
   }
+
   function fresh(i) { return procGen[i] === fetchGen }
 
   function invalidate() {
     fetchGen += 1
-    for (var i = 0; i < guardedProcs.length; i++) {
+    var pc = pendingCmd
+    for (var i = 0; i < 3; i++) {
+      pc[i] = null
       if (guardedProcs[i].running) guardedProcs[i].running = false
     }
+    pendingCmd = pc
     loading = false
   }
 
   function openFromHotkey() { open() }
 
   function refresh() {
-    if (!solarProc.running) { loading = true; stamp(0, solarProc) }
-    if (spotSource === "both" || spotSource === "pota") { if (!potaProc.running) stamp(1, potaProc) }
-    if (spotSource === "both" || spotSource === "sota") { if (!sotaProc.running) stamp(2, sotaProc) }
+    if (!solarProc.running) { loading = true; launch(0, fetchArgs(20, solarUrl)) }
+    if (spotSource === "both" || spotSource === "pota") { if (!potaProc.running) launch(1, fetchArgs(20, potaUrl)) }
+    if (spotSource === "both" || spotSource === "sota") { if (!sotaProc.running) launch(2, fetchArgs(20, sotaUrl)) }
   }
 
   Component.onCompleted: refresh()
@@ -305,8 +351,7 @@ Panel {
       var started = root.guardStarted
       for (var i = 0; i < root.guardedProcs.length; i++) {
         var proc = root.guardedProcs[i]
-        if (!proc.running) { started[i] = 0; continue }
-        if (!started[i]) { started[i] = now; continue }
+        if (!proc.running || !started[i]) continue
         if (now - started[i] > (root.guardLimits[i] + 5) * 1000) {
           proc.running = false
           started[i] = 0
@@ -319,8 +364,8 @@ Panel {
 
   Process {
     id: solarProc
-    command: root.fetchArgs(20, root.solarUrl)
-    onExited: root.loading = false
+    command: ["true"]            // replaced at launch
+    onExited: { root.loading = false; root.startPending(0) }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -338,13 +383,16 @@ Panel {
 
   Process {
     id: potaProc
-    command: root.fetchArgs(20, root.potaUrl)
+    command: ["true"]            // replaced at launch
+    onExited: root.startPending(1)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         if (!root.fresh(1)) return
         try {
-          var arr = root.boundedList(root.parseBounded(text), 120)
+          var arr = root.parseBounded(text)
+          if (!arr) return
+          arr = root.boundedList(arr, 120)
           var out = []
           for (var i = 0; i < arr.length; i++) {
             var s = Ham.normalisePotaSpot(arr[i])
@@ -358,13 +406,16 @@ Panel {
 
   Process {
     id: sotaProc
-    command: root.fetchArgs(20, root.sotaUrl)
+    command: ["true"]            // replaced at launch
+    onExited: root.startPending(2)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         if (!root.fresh(2)) return
         try {
-          var arr = root.boundedList(root.parseBounded(text), 120)
+          var arr = root.parseBounded(text)
+          if (!arr) return
+          arr = root.boundedList(arr, 120)
           var out = []
           for (var i = 0; i < arr.length; i++) {
             var s = Ham.normaliseSotaSpot(arr[i])
