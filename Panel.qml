@@ -1381,7 +1381,7 @@ Panel {
                   - above
                   - below
               )
-	    }
+            }
 
             height: visible ? Math.min(naturalHeight, maxHeight) : 0
 
