@@ -18,10 +18,14 @@ the location your Omarchy weather widget already knows.
   picked out and the other dimmed; then the numbers that produced it — solar
   flux, sunspot number, A and K, the X-ray class, foF2 and the signal-noise
   estimate.
-- **Spots** — live POTA and SOTA activations, newest first, each row coloured by
-  what that band is doing right now, with the band derived from the spotted
-  frequency rather than trusted from the feed. Filter it to the bands you can
-  actually work.
+- **Spots** — live POTA and SOTA activations, nearest first from your locator,
+  each row coloured by what that band is doing right now, with source, place,
+  age, distance/bearing, band, frequency and mode. POTA supplies park
+  coordinates directly; SOTA summit coordinates are resolved from the official
+  summit API and cached in the running shell. Use the in-panel source/band chips
+  for temporary filtering, and click a row to open the corresponding POTA park
+  or SOTA summit page. The band is derived from the spotted frequency rather
+  than trusted from the feed.
 - **Grey line** — today as a strip: night dark, day light, and the two grey-line
   windows picked out in amber, with a marker for now. Sunrise, sunset, and how
   long until the next window.
@@ -59,7 +63,9 @@ against itself:
   band grade has to be a word we know, and nearly every spotted frequency has to
   land in a band. Only *nearly* — operators mistype frequencies and the feed
   passes them through, so a spot at 700.5 MHz is a fat finger rather than a band
-  we are missing, and refusing to map it is the right behaviour.
+  we are missing, and refusing to map it is the right behaviour. The live POTA
+  check also verifies usable coordinates, and the SOTA check follows one live
+  spot through the official summit-detail endpoint and verifies its coordinates.
 
 ```bash
 node tools/test-ham.mjs            # includes the live checks
@@ -146,6 +152,9 @@ Everything here is fetched from the public internet and displayed, so:
   is discarded rather than accepted late.
 - A watchdog holds an independent deadline over every fetch, because
   `--max-time` is curl's own clock.
+- SOTA coordinate enrichment is serialized and cached by summit reference, so
+  a new summit is looked up once rather than producing a burst of repeat API
+  requests every time the spot list refreshes.
 - The location file is read through a bounded, time-limited reader rather than
   `FileView.text()`, which has no size cap and would block on a planted FIFO.
 

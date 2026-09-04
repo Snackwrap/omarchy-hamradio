@@ -300,6 +300,33 @@ function greyLine(now, lat, lon) {
   return best
 }
 
+// The next sunrise or sunset strictly after `now`.  greyLine() deliberately
+// chooses the closest event on either side because that is what an *active*
+// grey-line window needs; UI copy such as "sunset in 2h" needs the next event
+// instead, not the sunrise that happened twenty minutes ago.
+function nextSolarEvent(now, lat, lon) {
+  var day = 86400000
+  var best = null
+  for (var i = 0; i <= 2; i++) {
+    var ev = solarEvents(new Date(now.getTime() + i * day), lat, lon, -0.833)
+    if (!ev || ev.always) continue
+    var candidates = [
+      { kind: "sunrise", at: ev.rise },
+      { kind: "sunset", at: ev.set }
+    ]
+    for (var c = 0; c < candidates.length; c++) {
+      var at = candidates[c].at
+      if (!at) continue
+      var delta = at.getTime() - now.getTime()
+      if (delta <= 0) continue
+      if (best === null || delta < best.delta) {
+        best = { kind: candidates[c].kind, at: at, delta: delta }
+      }
+    }
+  }
+  return best
+}
+
 // ---- Geography -------------------------------------------------------------
 
 function distanceKm(lat1, lon1, lat2, lon2) {
@@ -335,6 +362,13 @@ function normalisePotaSpot(s, here) {
   if (!s) return null
   var call = String(s.activator || "").toUpperCase().replace(/[^A-Z0-9\/]/g, "").slice(0, 16)
   if (call === "") return null
+  var lat = parseFloat(String(s.latitude === null || s.latitude === undefined ? "" : s.latitude))
+  var lon = parseFloat(String(s.longitude === null || s.longitude === undefined ? "" : s.longitude))
+  if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    var grid = gridToLatLon(String(s.grid6 || s.grid4 || ""))
+    lat = grid ? grid.lat : NaN
+    lon = grid ? grid.lon : NaN
+  }
   return {
     source: "POTA",
     call: call,
@@ -343,8 +377,9 @@ function normalisePotaSpot(s, here) {
     band: bandFor(s.frequency),
     ref: String(s.reference || "").toUpperCase().replace(/[^A-Z0-9\-]/g, "").slice(0, 12),
     place: String(s.parkName || s.name || ""),
-    at: s.spotTime ? Date.parse(String(s.spotTime) + "Z") : NaN,
-    lat: NaN, lon: NaN
+    at: s.spotTime ? Date.parse(String(s.spotTime).replace(/Z?$/, "Z")) : NaN,
+    lat: lat, lon: lon,
+    geoKey: ""
   }
 }
 
@@ -352,24 +387,53 @@ function normaliseSotaSpot(s, here) {
   if (!s) return null
   var call = String(s.activatorCallsign || "").toUpperCase().replace(/[^A-Z0-9\/]/g, "").slice(0, 16)
   if (call === "" || call === "DEPRECATED") return null
+  var rawRef = String(s.summitCode || "").toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 20)
+  var assoc = String(s.associationCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8)
+  var summit = rawRef
+  var slash = rawRef.indexOf("/")
+  if (slash > 0) {
+    assoc = rawRef.slice(0, slash).replace(/[^A-Z0-9]/g, "").slice(0, 8)
+    summit = rawRef.slice(slash + 1).replace(/[^A-Z0-9\-]/g, "").slice(0, 12)
+  } else {
+    summit = rawRef.replace(/[^A-Z0-9\-]/g, "").slice(0, 12)
+  }
+  var fullRef = assoc !== "" && summit !== "" ? assoc + "/" + summit : rawRef
+  var lat = parseFloat(String(s.latitude === null || s.latitude === undefined ? "" : s.latitude))
+  var lon = parseFloat(String(s.longitude === null || s.longitude === undefined ? "" : s.longitude))
+  if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    lat = NaN; lon = NaN
+  }
   return {
     source: "SOTA",
     call: call,
     freq: toKHz(s.frequency),
     mode: String(s.mode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8),
     band: bandFor(s.frequency),
-    ref: String(s.summitCode || "").toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 12),
+    ref: fullRef.slice(0, 20),
     place: String(s.summitName || s.summitDetails || ""),
     at: s.timeStamp ? Date.parse(String(s.timeStamp).replace(/Z?$/, "Z")) : NaN,
-    lat: NaN, lon: NaN
+    lat: lat, lon: lon,
+    // The official summit-detail API is /api/summits/{association}/{summit}.
+    // Keep only an allow-listed path shape so it is safe to append to that
+    // fixed HTTPS origin when the panel enriches a spot with coordinates.
+    geoKey: assoc !== "" && summit !== "" ? assoc + "/" + summit : ""
   }
 }
 
-// Newest first, and only the bands that are actually reported as open unless
-// the caller asks for everything.
-function sortSpots(spots) {
+// With a local position, nearest activation first.  Unknown coordinates sort
+// after known ones and retain newest-first order among themselves.  Without a
+// local position, preserve the original newest-first behaviour.
+function sortSpots(spots, here) {
   var out = (spots || []).slice(0)
+  var useDistance = here && isFinite(Number(here.lat)) && isFinite(Number(here.lon))
   out.sort(function (a, b) {
+    if (useDistance) {
+      var ad = isFinite(a.lat) && isFinite(a.lon)
+        ? distanceKm(Number(here.lat), Number(here.lon), Number(a.lat), Number(a.lon)) : Infinity
+      var bd = isFinite(b.lat) && isFinite(b.lon)
+        ? distanceKm(Number(here.lat), Number(here.lon), Number(b.lat), Number(b.lon)) : Infinity
+      if (ad !== bd) return ad - bd
+    }
     var at = isFinite(a.at) ? a.at : 0
     var bt = isFinite(b.at) ? b.at : 0
     return bt - at

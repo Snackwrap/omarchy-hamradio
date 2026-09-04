@@ -40,7 +40,8 @@ Panel {
   readonly property string solarUrl: "https://www.hamqsl.com/solarxml.php"
   readonly property string potaUrl: "https://api.pota.app/spot/activator"
   readonly property string sotaUrl: "https://api2.sota.org.uk/api/spots/20/all"
-  readonly property string ua: "omarchy-hamradio/0.1"
+  readonly property string sotaSummitUrl: "https://api2.sota.org.uk/api/summits/"
+  readonly property string ua: "omarchy-hamradio/0.2"
 
   // ---- Settings ---------------------------------------------------------
   function boolSetting(name, dflt) { var v = setting(name, dflt); return v === true || v === "true" || v === 1 }
@@ -204,12 +205,32 @@ Panel {
   property var sotaSpots: []
   property string lastError: ""
   property bool loading: false
+  property bool potaStale: false
+  property bool sotaStale: false
+  property double lastPotaSuccessMs: 0
+  property double lastSotaSuccessMs: 0
+
+  // These are intentionally session-only.  The manifest/CLI settings remain
+  // the persistent policy; these chips are just a fast way to focus the list
+  // while the popup is open.
+  property string spotUiSource: "all"
+  property string spotUiBand: ""
+
+  // SOTA's spot feed identifies the summit but does not reliably carry its
+  // coordinates.  Resolve each unseen summit through the official summit API,
+  // one at a time, and cache it for the lifetime of the shell.
+  property var sotaGeoCache: ({})
+  property var sotaGeoCacheOrder: []
+  property var sotaGeoQueue: []
+  property string sotaGeoCurrent: ""
+  property double sotaGeoStartedMs: 0
 
   // ---- Derived ----------------------------------------------------------
   readonly property bool isDay: hasSite ? Ham.isDaylight(new Date(nowMs), siteLat, siteLon) : true
   readonly property var bandRows: solar ? Ham.bandsForNow(solar.bands, isDay) : []
   readonly property var best: solar ? Ham.bestBand(solar.bands, isDay) : null
   readonly property var greyLine: hasSite ? Ham.greyLine(new Date(nowMs), siteLat, siteLon) : null
+  readonly property var nextTransition: hasSite ? Ham.nextSolarEvent(new Date(nowMs), siteLat, siteLon) : null
 
   readonly property var spots: {
     var all = []
@@ -218,8 +239,40 @@ Panel {
     if (bandFilter.length) {
       all = all.filter(function (s) { return bandFilter.indexOf(String(s.band).toLowerCase()) >= 0 })
     }
-    return Ham.sortSpots(all)
+    return Ham.sortSpots(all, hasSite ? { lat: siteLat, lon: siteLon } : null)
   }
+
+  readonly property var displaySpots: {
+    var out = spots
+    if (spotUiSource !== "all") {
+      var wantSource = spotUiSource.toUpperCase()
+      out = out.filter(function (s) { return String(s.source).toUpperCase() === wantSource })
+    }
+    if (spotUiBand !== "") {
+      var wantBand = spotUiBand.toLowerCase()
+      out = out.filter(function (s) { return String(s.band).toLowerCase() === wantBand })
+    }
+    return out
+  }
+
+  readonly property var spotBandOptions: {
+    var out = [{ band: "", label: "ALL" }]
+    var hf = Ham.hfBands()
+    for (var i = 0; i < hf.length; i++) out.push({ band: hf[i].band, label: hf[i].band })
+    return out
+  }
+
+  readonly property int visiblePotaCount: spots.filter(function (s) { return s.source === "POTA" }).length
+  readonly property int visibleSotaCount: spots.filter(function (s) { return s.source === "SOTA" }).length
+  readonly property double lastSpotSuccessMs:
+    spotSource === "pota" ? lastPotaSuccessMs
+    : (spotSource === "sota" ? lastSotaSuccessMs
+       : (spotSource === "both" ? Math.max(lastPotaSuccessMs, lastSotaSuccessMs) : 0))
+  readonly property bool spotsStale:
+    (spotSource === "both" && (potaStale || sotaStale))
+    || (spotSource === "pota" && potaStale)
+    || (spotSource === "sota" && sotaStale)
+  readonly property bool refreshing: solarProc.running || potaProc.running || sotaProc.running
 
   // Frequencies only, for the spectrum's ticks — the spot list itself is
   // already capped, and this follows whatever filter is applied to it.
@@ -242,6 +295,82 @@ Panel {
   }
   readonly property string gradeColor: best ? gradeFor(best.grade) : ""
 
+  function ageText(at) {
+    return Ham.formatAge(Ham.minutesAgo(at, nowMs))
+  }
+
+  function distanceForSpot(s) {
+    if (!hasSite || !s || !isFinite(s.lat) || !isFinite(s.lon)) return NaN
+    return Ham.distanceKm(siteLat, siteLon, Number(s.lat), Number(s.lon))
+  }
+
+  function distanceText(s) {
+    var km = distanceForSpot(s)
+    if (!isFinite(km)) return ""
+    var bearing = Ham.bearingDeg(siteLat, siteLon, Number(s.lat), Number(s.lon))
+    return Math.round(km) + " km " + Ham.cardinal(bearing)
+  }
+
+  function spotUrl(s) {
+    if (!s || !s.ref) return ""
+    var ref = String(s.ref).toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 20)
+    if (ref === "") return ""
+    if (s.source === "POTA") return "https://pota.app/#/park/" + ref.replace(/\//g, "")
+    if (s.source === "SOTA" && ref.indexOf("/") > 0) return "https://summits.sota.org.uk/summit/" + ref
+    return ""
+  }
+
+  function openSpot(s) {
+    var url = spotUrl(s)
+    if (url === "" || browserProc.running) return
+    browserProc.command = ["xdg-open", url]
+    browserProc.running = true
+  }
+
+  function spotFreshness() {
+    if (!lastSpotSuccessMs) return "waiting for first update"
+    var age = Ham.formatAge(Ham.minutesAgo(lastSpotSuccessMs, nowMs))
+    return age === "now" ? "updated now" : "updated " + age + " ago"
+  }
+
+  function durationText(ms) {
+    var m = Math.ceil(Math.max(0, Number(ms)) / 60000)
+    return m < 1 ? "<1m" : Ham.formatAge(m)
+  }
+
+  function transitionText() {
+    if (!hasSite) return ""
+    if (!nextTransition) {
+      return todayEvents && todayEvents.always === "above" ? "POLAR DAY" :
+             (todayEvents && todayEvents.always === "below" ? "POLAR NIGHT" : (isDay ? "DAY" : "NIGHT"))
+    }
+    return (isDay ? "DAY" : "NIGHT") + " · " + nextTransition.kind + " in "
+      + durationText(nextTransition.delta)
+  }
+
+  function greyWindowCenter() {
+    if (greyLine && greyLine.active) return greyLine
+    return nextTransition
+  }
+
+  function greyWindowStatus() {
+    var center = greyWindowCenter()
+    if (!center || !center.at) return ""
+    var span = (Ham.GREY_LINE_MINUTES || 40) * 60000
+    if (greyLine && greyLine.active) {
+      var remaining = center.at.getTime() + span - nowMs
+      return "OPEN · " + durationText(remaining) + " remaining"
+    }
+    return "next " + center.kind + " in " + durationText(center.at.getTime() - nowMs)
+  }
+
+  function greyWindowRange() {
+    var center = greyWindowCenter()
+    if (!center || !center.at) return ""
+    var span = (Ham.GREY_LINE_MINUTES || 40) * 60000
+    return clock(center.at.getTime() - span) + "–" + clock(center.at.getTime() + span)
+  }
+
   // ---- Bar pill ---------------------------------------------------------
   readonly property string label: safeBare(rawLabel, 40)
 
@@ -259,16 +388,25 @@ Panel {
   readonly property string tooltip: safeBareLines(rawTooltip, 80, 10)
 
   readonly property string rawTooltip: {
-    if (lastError !== "") return "Ham radio — " + lastError
-    if (!solar) return "Ham radio — loading"
     var parts = []
+    if (lastError !== "") parts.push("Ham radio — " + lastError)
+    if (myGrid !== "") {
+      var transition = transitionText()
+      parts.push(myGrid + (transition !== "" ? " · " + transition.toLowerCase() : ""))
+    }
+    if (!solar) {
+      if (!parts.length) parts.push("Ham radio — loading")
+      return parts.join("\n")
+    }
     parts.push("SFI " + (isFinite(solar.sfi) ? solar.sfi : "--")
                + "  A " + (isFinite(solar.a) ? solar.a : "--")
                + "  K " + (isFinite(solar.k) ? solar.k : "--"))
     for (var i = 0; i < bandRows.length; i++) {
       parts.push(safeBare(bandRows[i].band, 12) + "  " + safeBare(bandRows[i].grade, 8))
     }
-    if (greyLine && greyLine.active) parts.push("Grey line now (" + greyLine.kind + ")")
+    parts.push(spots.length + " activations" + (spotsStale ? " · stale source" : ""))
+    if (greyLine && greyLine.active) parts.push("Grey line · " + greyWindowStatus())
+    else if (greyWindowCenter()) parts.push("Grey line · " + greyWindowStatus())
     return parts.join("\n")
   }
 
@@ -341,6 +479,46 @@ Panel {
 
   function openFromHotkey() { open() }
 
+  function applyCachedSotaGeo(s) {
+    if (!s || s.geoKey === "") return false
+    var v = sotaGeoCache["k:" + s.geoKey]
+    if (!v || !isFinite(v.lat) || !isFinite(v.lon)) return false
+    s.lat = Number(v.lat); s.lon = Number(v.lon)
+    return true
+  }
+
+  function queueSotaGeo(list) {
+    var q = sotaGeoQueue.slice(0)
+    for (var i = 0; i < (list || []).length; i++) {
+      var s = list[i]
+      if (!s || s.geoKey === "" || (isFinite(s.lat) && isFinite(s.lon)) || applyCachedSotaGeo(s)) continue
+      if (s.geoKey === sotaGeoCurrent || q.indexOf(s.geoKey) >= 0) continue
+      q.push(s.geoKey)
+    }
+    sotaGeoQueue = q.slice(0, 64)
+    if (!sotaGeoProc.running && sotaGeoCurrent === "") sotaGeoNextTimer.restart()
+  }
+
+  function startNextSotaGeo() {
+    if (sotaGeoProc.running || sotaGeoCurrent !== "" || !sotaGeoQueue.length) return
+    var q = sotaGeoQueue.slice(0)
+    var key = String(q.shift() || "").toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 24)
+    sotaGeoQueue = q
+    if (!/^[A-Z0-9]{1,8}\/[A-Z0-9]{1,8}-[0-9]{1,4}$/.test(key)) {
+      sotaGeoNextTimer.restart(); return
+    }
+    sotaGeoCurrent = key
+    sotaGeoStartedMs = Date.now()
+    sotaGeoProc.command = fetchArgs(12, sotaSummitUrl + key)
+    sotaGeoProc.running = true
+  }
+
+  function finishSotaGeo() {
+    sotaGeoStartedMs = 0
+    sotaGeoCurrent = ""
+    if (sotaGeoQueue.length) sotaGeoNextTimer.restart()
+  }
+
   function refresh() {
     if (!solarProc.running) { loading = true; launch(0, fetchArgs(20, solarUrl)) }
     if (spotSource === "both" || spotSource === "pota") { if (!potaProc.running) launch(1, fetchArgs(20, potaUrl)) }
@@ -354,7 +532,15 @@ Panel {
     Qt.callLater(playForView)
     if (debugGeometry) geometryTimer.restart()
   }
-  onSpotSourceChanged: { invalidate(); refresh() }
+  onSpotSourceChanged: {
+    invalidate()
+    if (spotSource !== "both" && spotSource !== "sota") {
+      sotaGeoQueue = []
+      if (sotaGeoProc.running) sotaGeoProc.running = false
+      finishSotaGeo()
+    }
+    refresh()
+  }
 
   // The solar feed is regenerated roughly hourly; the spot feeds move
   // constantly but a bar widget does not need to see every one of them.
@@ -362,6 +548,17 @@ Panel {
   Timer { interval: 180000; running: true; repeat: true
           onTriggered: { if (root.spotSource !== "off") root.refresh() } }
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
+  Timer { id: sotaGeoNextTimer; interval: 750; onTriggered: root.startNextSotaGeo() }
+  Timer {
+    interval: 1000; running: true; repeat: true
+    onTriggered: {
+      if (sotaGeoProc.running && root.sotaGeoStartedMs
+          && Date.now() - root.sotaGeoStartedMs > 17000) {
+        sotaGeoProc.running = false
+        root.finishSotaGeo()
+      }
+    }
+  }
 
   // curl's --max-time is curl's own clock. This is an independent one.
   Timer {
@@ -413,7 +610,7 @@ Panel {
         if (!root.fresh(1)) return
         try {
           var arr = root.parseBounded(text)
-          if (!arr) return
+          if (!arr || !Array.isArray(arr)) { root.potaStale = true; return }
           arr = root.boundedList(arr, 120)
           var out = []
           for (var i = 0; i < arr.length; i++) {
@@ -421,7 +618,9 @@ Panel {
             if (s) { s.place = root.safe(s.place, 40); out.push(s) }
           }
           root.potaSpots = out
-        } catch (e) { /* keep the previous list */ }
+          root.lastPotaSuccessMs = Date.now()
+          root.potaStale = false
+        } catch (e) { root.potaStale = true /* keep the previous list */ }
       }
     }
   }
@@ -436,18 +635,64 @@ Panel {
         if (!root.fresh(2)) return
         try {
           var arr = root.parseBounded(text)
-          if (!arr) return
+          if (!arr || !Array.isArray(arr)) { root.sotaStale = true; return }
           arr = root.boundedList(arr, 120)
           var out = []
           for (var i = 0; i < arr.length; i++) {
             var s = Ham.normaliseSotaSpot(arr[i])
-            if (s) { s.place = root.safe(s.place, 40); out.push(s) }
+            if (s) {
+              s.place = root.safe(s.place, 40)
+              root.applyCachedSotaGeo(s)
+              out.push(s)
+            }
           }
           root.sotaSpots = out
-        } catch (e) { /* keep the previous list */ }
+          root.lastSotaSuccessMs = Date.now()
+          root.sotaStale = false
+          root.queueSotaGeo(out)
+        } catch (e) { root.sotaStale = true /* keep the previous list */ }
       }
     }
   }
+
+  Process {
+    id: sotaGeoProc
+    command: ["true"]
+    onExited: root.finishSotaGeo()
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var key = root.sotaGeoCurrent
+        if (key === "") return
+        try {
+          var d = root.parseBounded(text)
+          if (Array.isArray(d)) d = d.length ? d[0] : null
+          if (!d) return
+          var lat = parseFloat(String(d.latitude === null || d.latitude === undefined ? "" : d.latitude))
+          var lon = parseFloat(String(d.longitude === null || d.longitude === undefined ? "" : d.longitude))
+          if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return
+          var cache = root.sotaGeoCache
+          var order = root.sotaGeoCacheOrder.slice(0)
+          var cacheKey = "k:" + key
+          if (!cache[cacheKey]) order.push(cacheKey)
+          while (order.length > 512) {
+            var expired = order.shift()
+            delete cache[expired]
+          }
+          cache[cacheKey] = { lat: lat, lon: lon }
+          root.sotaGeoCache = cache
+          root.sotaGeoCacheOrder = order
+          var list = root.sotaSpots.slice(0)
+          for (var i = 0; i < list.length; i++) {
+            if (list[i].geoKey === key) { list[i].lat = lat; list[i].lon = lon }
+          }
+          root.sotaSpots = list
+        } catch (e) { /* retry naturally if the summit is spotted again */ }
+      }
+    }
+  }
+
+  Process { id: browserProc; command: ["true"] }
 
   // ---- Grey-line strip geometry -----------------------------------------
   readonly property double localMidnightMs: {
@@ -554,14 +799,43 @@ Panel {
             }
           }
 
-          Text {
-            textFormat: Text.PlainText
+          Row {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: root.myGrid !== "" ? (root.myGrid + "  ·  " + (root.isDay ? "day" : "night")) : ""
-            color: Color.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.space(11)
+            spacing: Style.space(7)
+
+            Text {
+              textFormat: Text.PlainText
+              text: root.myGrid !== "" ? (root.myGrid + "  ·  " + (root.isDay ? "day" : "night")) : ""
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.space(11)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              id: refreshGlyph
+              textFormat: Text.PlainText
+              text: "↻"
+              color: Color.popups.text
+              opacity: root.refreshing ? 0.45 : 0.8
+              font.family: Style.font.family
+              font.pixelSize: Style.space(13)
+              anchors.verticalCenter: parent.verticalCenter
+
+              NumberAnimation on rotation {
+                from: 0; to: 360; duration: 850
+                loops: Animation.Infinite
+                running: root.refreshing
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                anchors.margins: -Style.space(5)
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.refresh()
+              }
+            }
           }
         }
 
@@ -595,6 +869,15 @@ Panel {
               anchors.bottom: parent.bottom
               bottomPadding: Style.space(4)
             }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            text: root.transitionText()
+            color: Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.space(11)
           }
 
           Text {
@@ -721,13 +1004,53 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            visible: root.spots.length === 0
+            width: parent.width
+            text: root.spotSource === "off" ? ""
+              : ("POTA " + root.visiblePotaCount + "  ·  SOTA " + root.visibleSotaCount
+                 + "  ·  " + root.spotFreshness()
+                 + (root.spotsStale ? "  ·  STALE SOURCE" : ""))
+            color: root.spotsStale ? "#d9a441" : Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.space(10)
+            wrapMode: Text.WordWrap
+          }
+
+          Flow {
+            width: parent.width
+            height: implicitHeight
+            spacing: Style.space(5)
+
+            FilterChip { label: "ALL"; selected: root.spotUiSource === "all"; onClicked: root.spotUiSource = "all" }
+            FilterChip { label: "POTA"; selected: root.spotUiSource === "pota"; onClicked: root.spotUiSource = "pota" }
+            FilterChip { label: "SOTA"; selected: root.spotUiSource === "sota"; onClicked: root.spotUiSource = "sota" }
+          }
+
+          Flow {
+            width: parent.width
+            height: implicitHeight
+            spacing: Style.space(4)
+            Repeater {
+              model: root.spotBandOptions
+              FilterChip {
+                required property var modelData
+                label: modelData.label
+                selected: root.spotUiBand === modelData.band
+                onClicked: root.spotUiBand = modelData.band
+              }
+            }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.displaySpots.length === 0
             width: parent.width
             text: root.spotSource === "off"
               ? "Spot fetching is turned off. Set spotSource to pota, sota or both to see live activations."
-              : (root.bandFilter.length
+              : (root.spotUiSource !== "all" || root.spotUiBand !== ""
+                 ? "No activations match the quick filters right now."
+                 : (root.bandFilter.length
                  ? "No activations on those bands right now."
-                 : "No activations reported right now.")
+                 : "No activations reported right now."))
             color: Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.space(12)
@@ -735,16 +1058,18 @@ Panel {
           }
 
           Repeater {
-            model: root.spots.slice(0, 14)
-            Row {
+            model: root.displaySpots.slice(0, 14)
+            Item {
               id: sp
               required property var modelData
               width: parent ? parent.width : 0
-              spacing: Style.space(7)
+              height: Style.space(34)
 
               Rectangle {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
                 width: Style.space(3)
-                height: Style.space(15)
+                height: Style.space(26)
                 radius: Style.space(2)
                 // The colour of the band's current grade, so the list says
                 // whether a spot is workable without a trip to the Bands tab.
@@ -755,50 +1080,84 @@ Panel {
                   return g !== "" ? root.gradeFor(g) : Color.muted
                 }
                 opacity: 0.85
+              }
+
+              Column {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(10)
+                anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(1)
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(7)
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Style.space(82)
+                    text: root.safe(sp.modelData.call, 16)
+                    color: Color.popups.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.space(12)
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Style.space(38)
+                    text: root.safe(sp.modelData.band, 6)
+                    color: Color.muted
+                    font.family: Style.font.family
+                    font.pixelSize: Style.space(11)
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Style.space(58)
+                    text: Ham.formatFreq(sp.modelData.freq)
+                    color: Color.muted
+                    font.family: Style.font.family
+                    font.pixelSize: Style.space(11)
+                    horizontalAlignment: Text.AlignRight
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Style.space(40)
+                    text: root.safe(sp.modelData.mode, 6)
+                    color: Color.muted
+                    font.family: Style.font.family
+                    font.pixelSize: Style.space(11)
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    width: Math.max(Style.space(30), parent.width - Style.space(240))
+                    text: root.distanceText(sp.modelData)
+                    color: Color.muted
+                    font.family: Style.font.family
+                    font.pixelSize: Style.space(10)
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideRight
+                  }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: root.safe(sp.modelData.source, 6) + " " + root.safe(sp.modelData.ref, 20)
+                    + (sp.modelData.place ? "  ·  " + root.safe(sp.modelData.place, 40) : "")
+                    + (root.ageText(sp.modelData.at) ? "  ·  " + root.ageText(sp.modelData.at) : "")
+                  color: Color.muted
+                  opacity: 0.78
+                  font.family: Style.font.family
+                  font.pixelSize: Style.space(9)
+                  elide: Text.ElideRight
+                }
               }
-              Text {
-                textFormat: Text.PlainText
-                width: Style.space(74)
-                text: root.safe(sp.modelData.call, 16)
-                color: Color.popups.text
-                font.family: Style.font.family
-                font.pixelSize: Style.space(12)
-                elide: Text.ElideRight
-              }
-              Text {
-                textFormat: Text.PlainText
-                width: Style.space(38)
-                text: root.safe(sp.modelData.band, 6)
-                color: Color.muted
-                font.family: Style.font.family
-                font.pixelSize: Style.space(11)
-              }
-              Text {
-                textFormat: Text.PlainText
-                width: Style.space(52)
-                text: Ham.formatFreq(sp.modelData.freq)
-                color: Color.muted
-                font.family: Style.font.family
-                font.pixelSize: Style.space(11)
-                horizontalAlignment: Text.AlignRight
-              }
-              Text {
-                textFormat: Text.PlainText
-                width: Style.space(34)
-                text: root.safe(sp.modelData.mode, 6)
-                color: Color.muted
-                font.family: Style.font.family
-                font.pixelSize: Style.space(11)
-              }
-              Text {
-                textFormat: Text.PlainText
-                width: Math.max(Style.space(20), sp.width - Style.space(220))
-                text: root.safe(sp.modelData.ref, 12)
-                color: Color.muted
-                font.family: Style.font.family
-                font.pixelSize: Style.space(11)
-                elide: Text.ElideRight
+
+              MouseArea {
+                anchors.fill: parent
+                enabled: root.spotUrl(sp.modelData) !== ""
+                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.openSpot(sp.modelData)
               }
             }
           }
@@ -811,7 +1170,7 @@ Panel {
           spacing: Style.space(8)
 
           PanelSectionHeader {
-            text: "TODAY"
+            text: root.greyLine && root.greyLine.active ? "GREY LINE · OPEN" : "GREY LINE · NEXT"
             foreground: Color.popups.text
             font.letterSpacing: Style.space(2)
           }
@@ -847,13 +1206,10 @@ Panel {
               note: "grey line ± 40 min"
             }
             StatRow {
-              label: "Next window"
-              value: root.greyLine ? root.clock(root.greyLine.at.getTime()) : "--"
-              note: root.greyLine
-                ? (root.greyLine.active ? "open now"
-                   : (root.greyLine.delta > 0 ? "in " + Math.round(root.greyLine.delta / 60000) + " min"
-                                              : Math.round(-root.greyLine.delta / 60000) + " min ago"))
-                : ""
+              label: "Grey window"
+              value: root.greyWindowRange() || "--"
+              valueWidth: Style.space(110)
+              note: root.greyWindowStatus()
               highlight: root.greyLine !== null && root.greyLine.active
             }
           }
@@ -882,12 +1238,47 @@ Panel {
     }
   }
 
+  component FilterChip: Rectangle {
+    id: fc
+    property string label: ""
+    property bool selected: false
+    signal clicked()
+
+    implicitWidth: chipLabel.implicitWidth + Style.space(12)
+    implicitHeight: Style.space(20)
+    width: implicitWidth
+    height: implicitHeight
+    radius: Style.space(4)
+    color: selected ? Color.accent : "transparent"
+    border.width: 1
+    border.color: selected ? Color.accent : Color.muted
+    opacity: selected ? 0.95 : 0.72
+
+    Text {
+      id: chipLabel
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: fc.label
+      color: fc.selected ? Color.popups.background : Color.popups.text
+      font.family: Style.font.family
+      font.pixelSize: Style.space(9)
+      font.bold: fc.selected
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onClicked: fc.clicked()
+    }
+  }
+
   component StatRow: Row {
     id: sr
     property string label: ""
     property string value: ""
     property string note: ""
     property bool highlight: false
+    property real valueWidth: Style.space(80)
     width: parent ? parent.width : 0
     spacing: Style.space(8)
 
@@ -902,7 +1293,7 @@ Panel {
     }
     Text {
       textFormat: Text.PlainText
-      width: Style.space(80)
+      width: sr.valueWidth
       text: sr.value
       color: sr.highlight ? Color.accent : Color.popups.text
       font.family: Style.font.family
@@ -911,7 +1302,7 @@ Panel {
     }
     Text {
       textFormat: Text.PlainText
-      width: Math.max(Style.space(20), sr.width - Style.space(130 + 80 + 16))
+      width: Math.max(Style.space(20), sr.width - Style.space(130 + 16) - sr.valueWidth)
       text: sr.note
       color: Color.muted
       elide: Text.ElideRight

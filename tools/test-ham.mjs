@@ -182,6 +182,10 @@ const gl = H.greyLine(nearRise, 51.5074, -0.1278)
 check("ten minutes before sunrise is grey line", gl && gl.active, JSON.stringify(gl && gl.kind))
 eq("and it knows which event", gl.kind, "sunrise")
 check("four hours out is not", !H.greyLine(farOff, 51.5074, -0.1278).active)
+const afterRise = new Date(ev.rise.getTime() + 60 * 60000)
+const nextSun = H.nextSolarEvent(afterRise, 51.5074, -0.1278)
+eq("after sunrise, sunset is the next transition", nextSun.kind, "sunset")
+check("the next transition is in the future", nextSun.delta > 0, `${nextSun.delta} ms`)
 
 console.log("\n# geography")
 near("a degree of latitude", H.distanceKm(0, 0, 1, 0), 111.2, 0.5)
@@ -191,19 +195,33 @@ eq("cardinal", H.cardinal(288), "WNW")
 
 console.log("\n# spot normalising")
 const pota = H.normalisePotaSpot({ activator: "dk5ur", frequency: "7074.0", mode: "ft8",
-                                   reference: "DE-1274", parkName: "Wetterau", spotTime: "2026-09-02T03:40:08" })
+                                   reference: "DE-1274", parkName: "Wetterau", spotTime: "2026-09-02T03:40:08",
+                                   latitude: 50.3, longitude: 8.8 })
 eq("callsign is upper case", pota.call, "DK5UR")
 eq("mode is upper case", pota.mode, "FT8")
 eq("band is derived", pota.band, "40m")
 eq("source is tagged", pota.source, "POTA")
-const sota = H.normaliseSotaSpot({ activatorCallsign: "VK2IO/P", frequency: 7.14, mode: "SSB", summitCode: "CT-001" })
+near("POTA latitude is retained", pota.lat, 50.3, 0.0001)
+near("POTA longitude is retained", pota.lon, 8.8, 0.0001)
+const potaGrid = H.normalisePotaSpot({ activator: "W1AW", frequency: "14074", reference: "US-0001", grid6: "FN31pr" })
+check("POTA grid is a coordinate fallback", isFinite(potaGrid.lat) && isFinite(potaGrid.lon), `${potaGrid.lat},${potaGrid.lon}`)
+const sota = H.normaliseSotaSpot({ activatorCallsign: "VK2IO/P", frequency: 7.14, mode: "SSB",
+                                   associationCode: "VK2", summitCode: "CT-001" })
 eq("SOTA MHz becomes the right band", sota.band, "40m")
 eq("a stroke in the callsign survives", sota.call, "VK2IO/P")
+eq("SOTA reference includes its association", sota.ref, "VK2/CT-001")
+eq("SOTA summit API path is retained", sota.geoKey, "VK2/CT-001")
 eq("the deprecated placeholder row is dropped", H.normaliseSotaSpot({ activatorCallsign: "DEPRECATED" }), null)
 eq("a spot with no callsign is dropped", H.normalisePotaSpot({ frequency: "7074" }), null)
 
 const sorted = H.sortSpots([{ at: 1000 }, { at: 3000 }, { at: 2000 }])
 eq("newest first", sorted.map(s => s.at).join(","), "3000,2000,1000")
+const byDistance = H.sortSpots([
+  { call: "far", lat: 2, lon: 0, at: 5000 },
+  { call: "unknown", lat: NaN, lon: NaN, at: 9000 },
+  { call: "near", lat: 0.25, lon: 0, at: 1000 }
+], { lat: 0, lon: 0 })
+eq("with a station location, nearest spot sorts first", byDistance.map(s => s.call).join(","), "near,far,unknown")
 eq("age wording", H.formatAge(45), "45m")
 eq("age wording, hours", H.formatAge(90), "1h30m")
 
@@ -235,12 +253,29 @@ if (!process.argv.includes("--offline")) {
     // failing on somebody else's typo.
     const mapped = spots.map(s => H.normalisePotaSpot(s)).filter(s => s && s.freq > 0)
     const unmapped = mapped.filter(s => s.band === "")
+    const located = mapped.filter(s => isFinite(s.lat) && isFinite(s.lon))
     check("nearly every spotted frequency lands in a band",
           mapped.length > 0 && unmapped.length / mapped.length < 0.1,
           unmapped.length ? `${unmapped.length}/${mapped.length} out of band: `
                             + unmapped.slice(0, 4).map(s => (s.freq / 1000).toFixed(3) + " MHz").join(", ")
                           : `${mapped.length}/${mapped.length}`)
+    check("POTA spots carry usable park coordinates",
+          mapped.length > 0 && located.length / mapped.length > 0.9,
+          `${located.length}/${mapped.length} located`)
   } catch (e) { console.log(`  skip  POTA unavailable (${e.message})`) }
+
+  try {
+    const spots = await get("https://api2.sota.org.uk/api/spots/20/all")
+    check("SOTA returned spots", Array.isArray(spots) && spots.length > 0, `${spots.length} spots`)
+    const sample = spots.map(s => H.normaliseSotaSpot(s)).find(s => s && s.geoKey)
+    check("a SOTA spot has an authoritative summit lookup key", !!sample, sample && sample.geoKey)
+    if (sample) {
+      const summit = await get("https://api2.sota.org.uk/api/summits/" + sample.geoKey)
+      check("SOTA summit lookup returns coordinates",
+            summit && isFinite(Number(summit.latitude)) && isFinite(Number(summit.longitude)),
+            summit && `${summit.latitude},${summit.longitude}`)
+    }
+  } catch (e) { console.log(`  skip  SOTA unavailable (${e.message})`) }
 }
 
 console.log(`\n${failures ? `${failures} FAILED` : "all checks passed"}\n`)
