@@ -322,9 +322,8 @@ Panel {
 
   function openSpot(s) {
     var url = spotUrl(s)
-    if (url === "" || browserProc.running) return
-    browserProc.command = ["xdg-open", url]
-    browserProc.running = true
+    if (url ==="") return
+    Quickshell.execDetached(["xdg-open", url])
   }
 
   function spotFreshness() {
@@ -691,8 +690,6 @@ Panel {
       }
     }
   }
-
-  Process { id: browserProc; command: ["true"] }
 
   // ---- Grey-line strip geometry -----------------------------------------
   readonly property double localMidnightMs: {
