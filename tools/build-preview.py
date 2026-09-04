@@ -17,7 +17,7 @@ BAND = 592
 
 PANELS = [
     ("bands.png",    "BANDS",     "day and night, and which one is in force"),
-    ("spots.png",    "SPOTS",     "live POTA and SOTA activations"),
+    ("spots.png",    "SPOTS",     "live POTA activations, nearest first"),
     ("greyline.png", "GREY LINE", "when the low bands go long"),
 ]
 
@@ -76,7 +76,7 @@ HTML = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
         <div class="sub">Band conditions for right now &mdash; day or night decided by where you actually are, not by the clock &mdash; with the solar numbers behind them, your grey-line windows, and who is on the air.</div>
         <ul class="feat">
           <li><b>Both halves of the table</b>, the one in force picked out</li>
-          <li><b>Live POTA and SOTA</b> spots, band derived from the frequency</li>
+          <li><b>Live POTA</b> spots, nearest first, band derived from the frequency</li>
           <li><b>No key, no account.</b> Finds your grid square on its own</li>
         </ul>
         <div class="install"><span class="p">$</span> omarchy plugin add <span class="c">github.com/Snackwrap/omarchy-hamradio</span></div>

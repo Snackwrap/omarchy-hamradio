@@ -562,7 +562,12 @@ Panel {
   Component.onCompleted: refresh()
   onOpenedChanged: {
     if (!opened) return
-    refresh()
+    // refresh(true), not refresh(): `spotsWatched` is a binding on `opened`, and
+    // QML does not promise the binding is re-evaluated before this handler runs,
+    // so refresh() could read the stale `false` and skip the fetch on the very
+    // open that needs it. Opening the panel is an explicit request for spots
+    // anyway, so say so rather than depending on evaluation order.
+    refresh(true)
     Qt.callLater(playForView)
     if (debugGeometry) geometryTimer.restart()
   }
