@@ -544,9 +544,19 @@ Panel {
 
   function openFromHotkey() { open() }
 
-  function refresh() {
+  // Something is showing spots: the popup is open, or the bar pill is set to a
+  // live spot count. The solar feed is different -- the pill's band grade comes
+  // from it, so it is always worth having.
+  readonly property bool spotsWatched:
+    spotSource !== "off" && (opened || pillContent === "spots")
+
+  // `wantSpots` is for the two explicit user gestures -- the refresh button and
+  // a middle-click on the pill -- which should fetch spots whether or not
+  // anything is currently displaying them. Everything else follows spotsWatched.
+  function refresh(wantSpots) {
     if (!solarProc.running) { loading = true; launch(0, fetchArgs(20, solarUrl)) }
-    if (spotSource !== "off") { if (!potaProc.running) launch(1, fetchArgs(20, potaUrl)) }
+    var spots = wantSpots === undefined ? spotsWatched : (wantSpots && spotSource !== "off")
+    if (spots && !potaProc.running) launch(1, fetchArgs(20, potaUrl))
   }
 
   Component.onCompleted: refresh()
@@ -558,11 +568,22 @@ Panel {
   }
   onSpotSourceChanged: { invalidate(); refresh() }
 
-  // The solar feed is regenerated roughly hourly; the spot feeds move
-  // constantly but a bar widget does not need to see every one of them.
+  // The solar feed is regenerated roughly hourly; the spot feed moves constantly
+  // but a bar widget does not need to see every one of them.
   Timer { interval: 900000; running: true; repeat: true; onTriggered: root.refresh() }
-  Timer { interval: 180000; running: true; repeat: true
-          onTriggered: { if (root.spotSource !== "off") root.refresh() } }
+
+  // Spots are only polled in the background when something is actually showing
+  // them: the popup being open, or a bar pill set to a live spot count. With the
+  // popup shut and the pill showing a band, this used to fetch every three
+  // minutes for a list nobody was looking at -- roughly 480 requests a day, per
+  // install, at somebody else's expense. Opening the popup always refreshes, so
+  // nothing is ever stale by the time it is seen.
+  Timer {
+    interval: 180000
+    repeat: true
+    running: root.spotsWatched
+    onTriggered: root.refresh()
+  }
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
   // curl's --max-time is curl's own clock. This is an independent one. A killed
   // slot remains active until both process-exit and stdout-finished are observed.
@@ -784,7 +805,7 @@ Panel {
                 anchors.fill: parent
                 anchors.margins: -Style.space(5)
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.refresh()
+                onClicked: root.refresh(true)
               }
             }
           }

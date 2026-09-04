@@ -18,8 +18,10 @@ BarWidget {
     if ("hostWidget" in target) target.hostWidget = root
   }
 
-  function refresh() {
-    if (panelLoader.item && panelLoader.item.refresh) panelLoader.item.refresh()
+  // The argument is forwarded, not swallowed: a middle-click is an explicit
+  // request for spots even when the popup is shut.
+  function refresh(wantSpots) {
+    if (panelLoader.item && panelLoader.item.refresh) panelLoader.item.refresh(wantSpots)
   }
 
   function togglePanel() {
@@ -93,7 +95,7 @@ BarWidget {
 
     onPressed: function(b) {
       if (!root.bar) return
-      if (b === Qt.MiddleButton) root.refresh()
+      if (b === Qt.MiddleButton) root.refresh(true)
       else root.togglePanel()
     }
   }
