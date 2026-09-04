@@ -26,8 +26,10 @@ the location your Omarchy weather widget already knows.
   N0NBH Good/Fair/Poor grades; an outlined stripe means that band has no N0NBH
   grade. POTA supplies park coordinates directly; SOTA uses the current spot
   schema, reconciles TEST/QRT/superseded records, and resolves summit coordinates
-  from the official summit API with bounded serialized caching. Click a row to
-  open the corresponding POTA park or SOTA summit page.
+  from the official summit API with bounded serialized caching. Enrichment is
+  applied in batches so nearest-first ordering does not reshuffle after every
+  individual lookup. Click a row to open the corresponding POTA park or SOTA
+  summit page; repeated clicks on the same row are briefly debounced.
 - **Grey line** — today as a strip: night dark, day light, and the two grey-line
   windows picked out in amber, with a marker for now. Sunrise, sunset, and how
   long until the next window.
@@ -57,8 +59,8 @@ against itself:
 - **The band plan** with a real frequency from each band's most-used segment,
   including the fact that POTA sends kHz as a string and SOTA sends MHz as a
   number, so `"7074.0"` and `7.14` must both come out as 40m.
-- **Sunrise and sunset** against real times for a known place and date, and the
-  polar day and polar night cases at 78° N.
+- **Sunrise and sunset** against real times for a known place and date, the
+  western-longitude UTC-cycle boundary, and polar day/night cases at 78° N.
 - **The solar feed** against a fixture, including that a MUF reported as `NoRpt`
   must not become a number.
 - Then, live: the real feed has to parse, the flux has to be plausible, every
@@ -150,12 +152,14 @@ Everything here is fetched from the public internet and displayed, so:
   stripped of control characters and length-clamped first. Qt's default
   `AutoText` renders a string as *rich* text when it looks like markup.
 - Each request carries a generation; a response whose stamp no longer matches
-  is discarded rather than accepted late.
+  is discarded rather than accepted late. A cancelled process slot is not reused
+  until both process exit and stdout completion have been observed.
 - A watchdog holds an independent deadline over every fetch, because
-  `--max-time` is curl's own clock.
+  `--max-time` is curl's own clock. The weather-file reader has its own deadline.
 - SOTA coordinate enrichment is serialized, bounded and cached by summit
-  reference. Failed lookups back off before retrying, so spot polling cannot fan
-  out into repeated summit requests.
+  reference. Invalid/missing summit responses are negatively cached for the
+  shell session; transient failures back off exponentially, and rate/auth/server
+  failures pause the queue so spot polling cannot fan out into repeated requests.
 - The location file is read through a bounded, time-limited reader rather than
   `FileView.text()`, which has no size cap and would block on a planted FIFO.
 

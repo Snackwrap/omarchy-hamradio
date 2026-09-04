@@ -41,7 +41,7 @@ Panel {
   readonly property string potaUrl: "https://api.pota.app/spot/activator"
   readonly property string sotaUrl: "https://api-db2.sota.org.uk/api/spots/20/all/all"
   readonly property string sotaSummitUrl: "https://api-db2.sota.org.uk/api/summits/"
-  readonly property string ua: "omarchy-hamradio/0.3"
+  readonly property string ua: "omarchy-hamradio/0.3.1"
 
   // ---- Settings ---------------------------------------------------------
   function boolSetting(name, dflt) { var v = setting(name, dflt); return v === true || v === "true" || v === 1 }
@@ -134,8 +134,8 @@ Panel {
   }
 
   // ---- Location ---------------------------------------------------------
-  // An explicit locator wins, then explicit coordinates, then the location the
-  // built-in weather widget already knows.
+  // Explicit coordinates override a locator; otherwise use the locator, then the
+  // location the built-in weather widget already knows.
   property var weatherLocation: ({ name: "", latitude: null, longitude: null })
 
   readonly property string weatherPath:
@@ -175,6 +175,8 @@ Panel {
   Process {
     id: weatherReader
     command: ["perl", "-e", root.safeReadScript, root.weatherPath]
+    onStarted: root.weatherStartedMs = Date.now()
+    onExited: root.weatherStartedMs = 0
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -230,9 +232,24 @@ Panel {
   property var sotaGeoCache: ({})
   property var sotaGeoCacheOrder: []
   property var sotaGeoRetryAfter: ({})
+  property var sotaGeoRetryCount: ({})
+  property var sotaGeoRetryOrder: []
+  property double sotaGeoPauseUntilMs: 0
   property var sotaGeoQueue: []
   property string sotaGeoCurrent: ""
   property double sotaGeoStartedMs: 0
+  property bool sotaGeoExitSeen: false
+  property bool sotaGeoStreamDone: false
+  property int sotaGeoExitCode: -1
+  property string sotaGeoStreamText: ""
+  property bool sotaGeoCancelled: false
+  property bool sotaGeoDirty: false
+
+  // Detached browser launches must not block a cold-starting browser, but the
+  // same row double-clicked while that browser starts should still be one user
+  // action. Different spot URLs are never throttled against each other.
+  property string lastSpotOpenUrl: ""
+  property double lastSpotOpenMs: 0
 
   // ---- Derived ----------------------------------------------------------
   readonly property bool isDay: hasSite ? Ham.isDaylight(new Date(nowMs), siteLat, siteLon) : true
@@ -291,8 +308,10 @@ Panel {
     spotUiBand = ""
   }
 
-  readonly property int visiblePotaCount: spots.filter(function (s) { return s.source === "POTA" }).length
-  readonly property int visibleSotaCount: spots.filter(function (s) { return s.source === "SOTA" }).length
+  readonly property int totalPotaCount: spots.filter(function (s) { return s.source === "POTA" }).length
+  readonly property int totalSotaCount: spots.filter(function (s) { return s.source === "SOTA" }).length
+  readonly property int visiblePotaCount: displaySpots.filter(function (s) { return s.source === "POTA" }).length
+  readonly property int visibleSotaCount: displaySpots.filter(function (s) { return s.source === "SOTA" }).length
   readonly property double lastSpotSuccessMs:
     spotSource === "pota" ? lastPotaSuccessMs
     : (spotSource === "sota" ? lastSotaSuccessMs
@@ -303,11 +322,12 @@ Panel {
     || (spotSource === "sota" && sotaStale)
   readonly property bool refreshing: solarProc.running || potaProc.running || sotaProc.running
 
-  // Frequencies only, for the spectrum's ticks — the spot list itself is
-  // already capped, and this follows whatever filter is applied to it.
+  // Frequencies only, for the spectrum's ticks. Quick source/band filters are
+  // presentation state, so the spectrum follows the same view the operator is
+  // looking at rather than silently showing hidden spots.
   readonly property var spotFreqs: {
     var out = []
-    var list = spots
+    var list = displaySpots
     for (var i = 0; i < list.length && out.length < 200; i++) {
       if (isFinite(list[i].freq)) out.push(list[i].freq)
     }
@@ -329,14 +349,17 @@ Panel {
   }
 
   function distanceForSpot(s) {
-    if (!hasSite || !s || !isFinite(s.lat) || !isFinite(s.lon)) return NaN
+    if (!hasSite || !s) return NaN
+    if (isFinite(s.distanceKm)) return Number(s.distanceKm)
+    if (!isFinite(s.lat) || !isFinite(s.lon)) return NaN
     return Ham.distanceKm(siteLat, siteLon, Number(s.lat), Number(s.lon))
   }
 
   function distanceText(s) {
     var km = distanceForSpot(s)
     if (!isFinite(km)) return ""
-    var bearing = Ham.bearingDeg(siteLat, siteLon, Number(s.lat), Number(s.lon))
+    var bearing = isFinite(s && s.bearingDeg) ? Number(s.bearingDeg)
+      : Ham.bearingDeg(siteLat, siteLon, Number(s.lat), Number(s.lon))
     return Math.round(km) + " km " + Ham.cardinal(bearing)
   }
 
@@ -352,9 +375,13 @@ Panel {
   function openSpot(s) {
     var url = spotUrl(s)
     if (url === "") return
-    // xdg-open may stay alive while a cold browser starts.  A tracked Process
-    // would then make later clicks look "busy" and drop them, so URL launches
-    // are deliberately independent fire-and-forget processes.
+    var now = Date.now()
+    if (url === lastSpotOpenUrl && now - lastSpotOpenMs < 1200) return
+    lastSpotOpenUrl = url
+    lastSpotOpenMs = now
+    // xdg-open may stay alive while a cold browser starts. A tracked Process
+    // would then make later clicks look "busy" and drop them, so each accepted
+    // click is detached; the same-URL debounce above only collapses double-clicks.
     Quickshell.execDetached(["xdg-open", url])
   }
 
@@ -365,7 +392,7 @@ Panel {
   }
 
   function setSpotBandFilter(value) {
-    spotUiBand = value
+    spotUiBand = (value !== "" && spotUiBand === value) ? "" : value
     Qt.callLater(function () { if (spotList) spotList.positionViewAtBeginning() })
   }
 
@@ -485,62 +512,196 @@ Panel {
   property int fetchGen: 0
   property var procGen: [0, 0, 0]
 
-  readonly property var guardedProcs: [solarProc, potaProc, sotaProc, weatherReader]
-  readonly property var guardLimits: [20, 20, 20, 4]
-  property var guardStarted: [0, 0, 0, 0]
+  readonly property var guardedProcs: [solarProc, potaProc, sotaProc]
+  readonly property var guardLimits: [20, 20, 20]
+  property var guardStarted: [0, 0, 0]
+  property var guardActive: [false, false, false]
+  property var guardStopping: [false, false, false]
+  property var guardExitSeen: [false, false, false]
+  property var guardStreamDone: [false, false, false]
+  property double weatherStartedMs: 0
 
   property var pendingCmd: [null, null, null]
 
-  // Start now if the slot is idle, otherwise queue: a superseded process can
-  // still flush its collector after `running = false`, and if the replacement
-  // had already rewritten the stamps that stale output would validate against
-  // the new request's checks. onExited starts the queued run, by which point
-  // the old collector has already run and been rejected.
+  // A Process can report exit and close its stdout in either order.  A slot is
+  // therefore not reusable until *both* signals for the old run have arrived.
+  // This keeps a cancelled/stale collector from observing stamps belonging to
+  // its replacement, especially when spotSource changes mid-request.
   function launch(i, cmd) {
     var pc = pendingCmd; pc[i] = cmd; pendingCmd = pc
     var proc = guardedProcs[i]
-    if (proc.running) { proc.running = false; return }
+    if (guardActive[i] || proc.running) {
+      if (proc.running && !guardStopping[i]) {
+        var stopping = guardStopping; stopping[i] = true; guardStopping = stopping
+        proc.running = false
+      }
+      return
+    }
     startPending(i)
   }
 
   function startPending(i) {
-    var started = guardStarted; started[i] = 0; guardStarted = started
+    if (guardActive[i] || guardedProcs[i].running) return
     var cmd = pendingCmd[i]
     if (!cmd) return
     var pc = pendingCmd; pc[i] = null; pendingCmd = pc
     var g = procGen; g[i] = fetchGen; procGen = g
+    var active = guardActive; active[i] = true; guardActive = active
+    var exits = guardExitSeen; exits[i] = false; guardExitSeen = exits
+    var streams = guardStreamDone; streams[i] = false; guardStreamDone = streams
+    var stopping = guardStopping; stopping[i] = false; guardStopping = stopping
     var proc = guardedProcs[i]
     proc.command = cmd
-    // Bound to the launch, not to the watchdog's next tick — otherwise a quick
-    // completion followed by a new run inherits the old run's age.
-    started = guardStarted; started[i] = Date.now(); guardStarted = started
+    var started = guardStarted; started[i] = Date.now(); guardStarted = started
     proc.running = true
   }
 
   function fresh(i) { return procGen[i] === fetchGen }
 
+  function guardedExited(i) {
+    var exits = guardExitSeen; exits[i] = true; guardExitSeen = exits
+    maybeReleaseGuard(i)
+  }
+
+  function guardedStreamFinished(i) {
+    var streams = guardStreamDone; streams[i] = true; guardStreamDone = streams
+    maybeReleaseGuard(i)
+  }
+
+  function maybeReleaseGuard(i) {
+    if (!guardActive[i] || !guardExitSeen[i] || !guardStreamDone[i]) return
+    var active = guardActive; active[i] = false; guardActive = active
+    var stopping = guardStopping; stopping[i] = false; guardStopping = stopping
+    var started = guardStarted; started[i] = 0; guardStarted = started
+    Qt.callLater(function () { root.startPending(i) })
+  }
+
   function invalidate() {
     fetchGen += 1
     var pc = pendingCmd
-    for (var i = 0; i < 3; i++) {
+    var stopping = guardStopping
+    for (var i = 0; i < guardedProcs.length; i++) {
       pc[i] = null
-      if (guardedProcs[i].running) guardedProcs[i].running = false
+      if (guardActive[i] || guardedProcs[i].running) {
+        stopping[i] = true
+        if (guardedProcs[i].running) guardedProcs[i].running = false
+      }
     }
     pendingCmd = pc
+    guardStopping = stopping
     loading = false
   }
 
   function openFromHotkey() { open() }
 
+  function sotaGeoFetchArgs(seconds, url) {
+    // Summit lookups need the HTTP status so permanent misses (404/410) can be
+    // cached separately from transient transport/server failures.  Do not use
+    // -f here: it would collapse every HTTP failure into curl exit 22.
+    return ["curl", "-q", "-sS", "-A", ua,
+            "--proto", "=https",
+            "--max-time", String(seconds),
+            "--max-filesize", String(maxResponseBytes),
+            "--write-out", "\n%{http_code}",
+            url]
+  }
+
+  function parseHttpEnvelope(raw) {
+    var text = String(raw || "")
+    var m = /\n([0-9]{3})$/.exec(text)
+    if (!m) return { status: 0, body: "" }
+    var body = text.slice(0, m.index)
+    if (body.length > maxResponseBytes) body = ""
+    return { status: parseInt(m[1]), body: body }
+  }
+
+  function clearSotaGeoRetry(key) {
+    var cacheKey = "k:" + key
+    var after = copyMap(sotaGeoRetryAfter); delete after[cacheKey]; sotaGeoRetryAfter = after
+    var counts = copyMap(sotaGeoRetryCount); delete counts[cacheKey]; sotaGeoRetryCount = counts
+    var order = sotaGeoRetryOrder.slice(0)
+    var at = order.indexOf(cacheKey)
+    if (at >= 0) order.splice(at, 1)
+    sotaGeoRetryOrder = order
+  }
+
+  function storeSotaGeoCache(key, value) {
+    var cacheKey = "k:" + key
+    var cache = copyMap(sotaGeoCache)
+    var order = sotaGeoCacheOrder.slice(0)
+    if (!Object.prototype.hasOwnProperty.call(cache, cacheKey)) order.push(cacheKey)
+    while (order.length > 512) {
+      var expired = order.shift()
+      delete cache[expired]
+    }
+    cache[cacheKey] = value
+    sotaGeoCache = cache
+    sotaGeoCacheOrder = order
+    clearSotaGeoRetry(key)
+  }
+
+  function rememberSotaGeoFailure(key, status) {
+    var cacheKey = "k:" + key
+    var counts = copyMap(sotaGeoRetryCount)
+    var attempt = Number(counts[cacheKey] || 0) + 1
+    var policy = Ham.sotaGeoFailurePolicy(status, attempt)
+    if (policy.permanent) {
+      // A real 404/410 cannot become useful by polling it every three minutes.
+      // Keep a terminal sentinel for this shell session; a shell restart or a
+      // future spot carrying coordinates naturally gives the summit a new path.
+      storeSotaGeoCache(key, { missing: true })
+      return
+    }
+
+    counts[cacheKey] = attempt
+    var after = copyMap(sotaGeoRetryAfter)
+    after[cacheKey] = Date.now() + policy.retryMs
+    var order = sotaGeoRetryOrder.slice(0)
+    if (order.indexOf(cacheKey) < 0) order.push(cacheKey)
+    while (order.length > 512) {
+      var expired = order.shift()
+      delete after[expired]
+      delete counts[expired]
+    }
+    sotaGeoRetryCount = counts
+    sotaGeoRetryAfter = after
+    sotaGeoRetryOrder = order
+    if (policy.globalMs > 0) sotaGeoPauseUntilMs = Math.max(sotaGeoPauseUntilMs, Date.now() + policy.globalMs)
+  }
+
   function applyCachedSotaGeo(s) {
     if (!s || s.geoKey === "") return false
-    var v = sotaGeoCache["k:" + s.geoKey]
+    var cacheKey = "k:" + s.geoKey
+    if (!Object.prototype.hasOwnProperty.call(sotaGeoCache, cacheKey)) return false
+    var v = sotaGeoCache[cacheKey]
+    if (v && v.missing === true) return true
     if (!v || !isFinite(v.lat) || !isFinite(v.lon)) return false
     s.lat = Number(v.lat); s.lon = Number(v.lon)
     return true
   }
 
+  function applySotaGeoBatch() {
+    if (!sotaGeoDirty) return
+    var list = sotaSpots.slice(0)
+    var changed = false
+    for (var i = 0; i < list.length; i++) {
+      var beforeLat = Number(list[i].lat), beforeLon = Number(list[i].lon)
+      root.applyCachedSotaGeo(list[i])
+      if ((!isFinite(beforeLat) || !isFinite(beforeLon)) && isFinite(list[i].lat) && isFinite(list[i].lon)) changed = true
+    }
+    sotaGeoDirty = false
+    if (changed) sotaSpots = list
+  }
+
+  function scheduleNextSotaGeo(delayMs) {
+    if (!sotaGeoQueue.length || sotaGeoCurrent !== "" || sotaGeoProc.running) return
+    var delay = Math.max(1500, Number(delayMs) || 1500)
+    sotaGeoNextTimer.interval = Math.min(delay, 1800000)
+    sotaGeoNextTimer.restart()
+  }
+
   function queueSotaGeo(list) {
+    if (!hasSite) return
     var q = sotaGeoQueue.slice(0)
     var now = Date.now()
     for (var i = 0; i < (list || []).length; i++) {
@@ -554,36 +715,77 @@ Panel {
     // Bounded and serialized: an initial global SOTA list must never turn into
     // an unbounded fan-out against SOTA infrastructure.
     sotaGeoQueue = q.slice(0, 32)
-    if (!sotaGeoProc.running && sotaGeoCurrent === "") sotaGeoNextTimer.restart()
+    if (sotaGeoQueue.length && !sotaGeoProc.running && sotaGeoCurrent === "") {
+      var pause = Math.max(0, sotaGeoPauseUntilMs - now)
+      scheduleNextSotaGeo(pause)
+    }
   }
 
   function startNextSotaGeo() {
-    if (sotaGeoProc.running || sotaGeoCurrent !== "" || !sotaGeoQueue.length) return
+    if (!hasSite || sotaGeoProc.running || sotaGeoCurrent !== "" || !sotaGeoQueue.length) return
+    var now = Date.now()
+    if (sotaGeoPauseUntilMs > now) { scheduleNextSotaGeo(sotaGeoPauseUntilMs - now); return }
     var q = sotaGeoQueue.slice(0)
     var key = String(q.shift() || "").toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 24)
     sotaGeoQueue = q
     if (!/^[A-Z0-9]{1,8}\/[A-Z0-9]{1,8}-[0-9]{1,4}$/.test(key)) {
-      sotaGeoNextTimer.restart(); return
+      scheduleNextSotaGeo(1500); return
     }
     sotaGeoCurrent = key
-    sotaGeoStartedMs = Date.now()
-    sotaGeoProc.command = fetchArgs(12, sotaSummitUrl + key)
+    sotaGeoStartedMs = now
+    sotaGeoExitSeen = false
+    sotaGeoStreamDone = false
+    sotaGeoExitCode = -1
+    sotaGeoStreamText = ""
+    sotaGeoCancelled = false
+    sotaGeoProc.command = sotaGeoFetchArgs(12, sotaSummitUrl + key)
     sotaGeoProc.running = true
   }
 
-  function finishSotaGeo() {
+  function tryFinishSotaGeo() {
+    if (sotaGeoCurrent === "" || !sotaGeoExitSeen || !sotaGeoStreamDone) return
     var key = sotaGeoCurrent
-    if (key !== "" && !sotaGeoCache["k:" + key]) {
-      // A transient failure should not be retried for the same summit every
-      // three-minute spot refresh. Five minutes is long enough to back off but
-      // short enough to recover while an activation is still likely live.
-      var retry = copyMap(sotaGeoRetryAfter)
-      retry["k:" + key] = Date.now() + 300000
-      sotaGeoRetryAfter = retry
-    }
-    sotaGeoStartedMs = 0
+    var cancelled = sotaGeoCancelled
+    var exitCode = sotaGeoExitCode
+    var envelope = parseHttpEnvelope(sotaGeoStreamText)
+
+    // Clear the run identity exactly once before any cache/list assignment can
+    // trigger bindings.  onExited and streamFinished may arrive in either order.
     sotaGeoCurrent = ""
-    if (sotaGeoQueue.length) sotaGeoNextTimer.restart()
+    sotaGeoStartedMs = 0
+    sotaGeoExitSeen = false
+    sotaGeoStreamDone = false
+    sotaGeoExitCode = -1
+    sotaGeoStreamText = ""
+    sotaGeoCancelled = false
+
+    if (!cancelled) {
+      if (exitCode === 0 && envelope.status >= 200 && envelope.status < 300) {
+        try {
+          var d = envelope.body === "" ? null : JSON.parse(envelope.body)
+          if (Array.isArray(d)) d = d.length ? d[0] : null
+          var lat = d ? parseFloat(String(d.latitude === null || d.latitude === undefined ? "" : d.latitude)) : NaN
+          var lon = d ? parseFloat(String(d.longitude === null || d.longitude === undefined ? "" : d.longitude)) : NaN
+          if (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+            storeSotaGeoCache(key, { lat: lat, lon: lon })
+            sotaGeoDirty = true
+            if (!sotaGeoFlushTimer.running) sotaGeoFlushTimer.start()
+          } else {
+            // A syntactically successful response with no usable coordinates is
+            // transient: do not convert an upstream schema hiccup into a session
+            // long negative cache.
+            rememberSotaGeoFailure(key, 502)
+          }
+        } catch (e) { rememberSotaGeoFailure(key, 502) }
+      } else {
+        rememberSotaGeoFailure(key, envelope.status || 0)
+      }
+    }
+
+    if (sotaGeoQueue.length) {
+      var pause = Math.max(0, sotaGeoPauseUntilMs - Date.now())
+      scheduleNextSotaGeo(pause)
+    }
   }
 
   function refresh() {
@@ -603,10 +805,21 @@ Panel {
     invalidate()
     if (spotSource !== "both" && spotSource !== "sota") {
       sotaGeoQueue = []
+      if (sotaGeoCurrent !== "") sotaGeoCancelled = true
       if (sotaGeoProc.running) sotaGeoProc.running = false
-      finishSotaGeo()
     }
     refresh()
+  }
+
+  onHasSiteChanged: {
+    if (hasSite) {
+      queueSotaGeo(sotaSpots)
+    } else {
+      // Coordinates have no value without an operator position to measure from.
+      sotaGeoQueue = []
+      if (sotaGeoCurrent !== "") sotaGeoCancelled = true
+      if (sotaGeoProc.running) sotaGeoProc.running = false
+    }
   }
 
   // The solar feed is regenerated roughly hourly; the spot feeds move
@@ -616,20 +829,25 @@ Panel {
           onTriggered: { if (root.spotSource !== "off") root.refresh() } }
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
   // Summit enrichment is intentionally slower than the spot polling path: one
-  // request at a time, at most every 1.5s, with positive and negative caches.
+  // request at a time, at most every 1.5s. Coordinate results are applied to the
+  // visible list in small batches so nearest-first ordering does not reshuffle
+  // beneath the pointer after every individual summit lookup.
   Timer { id: sotaGeoNextTimer; interval: 1500; onTriggered: root.startNextSotaGeo() }
+  Timer { id: sotaGeoFlushTimer; interval: 5000; onTriggered: root.applySotaGeoBatch() }
   Timer {
     interval: 1000; running: true; repeat: true
     onTriggered: {
       if (sotaGeoProc.running && root.sotaGeoStartedMs
           && Date.now() - root.sotaGeoStartedMs > 17000) {
+        // Do not finalize here. Setting running=false causes the normal exit and
+        // stream-finished signals; tryFinishSotaGeo() joins those exactly once.
         sotaGeoProc.running = false
-        root.finishSotaGeo()
       }
     }
   }
 
-  // curl's --max-time is curl's own clock. This is an independent one.
+  // curl's --max-time is curl's own clock. This is an independent one. A killed
+  // slot remains active until both process-exit and stdout-finished are observed.
   Timer {
     interval: 2000
     running: true
@@ -637,34 +855,44 @@ Panel {
     onTriggered: {
       var now = Date.now()
       var started = root.guardStarted
+      var stopping = root.guardStopping
       for (var i = 0; i < root.guardedProcs.length; i++) {
         var proc = root.guardedProcs[i]
-        if (!proc.running || !started[i]) continue
+        if (!root.guardActive[i] || !started[i]) continue
         if (now - started[i] > (root.guardLimits[i] + 5) * 1000) {
-          proc.running = false
+          stopping[i] = true
+          if (proc.running) proc.running = false
           started[i] = 0
           root.loading = false
         }
       }
       root.guardStarted = started
+      root.guardStopping = stopping
+
+      // The weather reader does not use the network queue, but its process is
+      // still independently time-bounded as the README promises.
+      if (weatherReader.running && root.weatherStartedMs
+          && now - root.weatherStartedMs > 5000) weatherReader.running = false
     }
   }
 
   Process {
     id: solarProc
     command: ["true"]            // replaced at launch
-    onExited: { root.loading = false; root.startPending(0) }
+    onExited: function (exitCode, exitStatus) { root.loading = false; root.guardedExited(0) }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.fresh(0)) return
-        var body = root.boundedText(text)
-        if (body === "") { root.lastError = "no solar data"; return }
-        var parsed = Ham.parseSolar(body)
-        if (!parsed || !parsed.bands.length) { root.lastError = "could not read the solar feed"; return }
-        parsed.bands = root.boundedList(parsed.bands, 12)
-        root.solar = parsed
-        root.lastError = ""
+        try {
+          if (!root.fresh(0)) return
+          var body = root.boundedText(text)
+          if (body === "") { root.lastError = "no solar data"; return }
+          var parsed = Ham.parseSolar(body)
+          if (!parsed || !parsed.bands.length) { root.lastError = "could not read the solar feed"; return }
+          parsed.bands = root.boundedList(parsed.bands, 12)
+          root.solar = parsed
+          root.lastError = ""
+        } finally { root.guardedStreamFinished(0) }
       }
     }
   }
@@ -672,24 +900,26 @@ Panel {
   Process {
     id: potaProc
     command: ["true"]            // replaced at launch
-    onExited: root.startPending(1)
+    onExited: function (exitCode, exitStatus) { root.guardedExited(1) }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.fresh(1)) return
         try {
-          var arr = root.parseBounded(text)
-          if (!arr || !Array.isArray(arr)) { root.potaStale = true; return }
-          arr = root.boundedList(arr, 120)
-          var out = []
-          for (var i = 0; i < arr.length; i++) {
-            var s = Ham.normalisePotaSpot(arr[i])
-            if (s) { s.place = root.safe(s.place, 40); out.push(s) }
-          }
-          root.potaSpots = out
-          root.lastPotaSuccessMs = Date.now()
-          root.potaStale = false
-        } catch (e) { root.potaStale = true /* keep the previous list */ }
+          if (!root.fresh(1)) return
+          try {
+            var arr = root.parseBounded(text)
+            if (!arr || !Array.isArray(arr)) { root.potaStale = true; return }
+            arr = root.boundedList(arr, 120)
+            var out = []
+            for (var i = 0; i < arr.length; i++) {
+              var s = Ham.normalisePotaSpot(arr[i])
+              if (s) { s.place = root.safe(s.place, 40); out.push(s) }
+            }
+            root.potaSpots = out
+            root.lastPotaSuccessMs = Date.now()
+            root.potaStale = false
+          } catch (e) { root.potaStale = true /* keep the previous list */ }
+        } finally { root.guardedStreamFinished(1) }
       }
     }
   }
@@ -697,25 +927,27 @@ Panel {
   Process {
     id: sotaProc
     command: ["true"]            // replaced at launch
-    onExited: root.startPending(2)
+    onExited: function (exitCode, exitStatus) { root.guardedExited(2) }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        if (!root.fresh(2)) return
         try {
-          var arr = root.parseBounded(text)
-          if (!arr || !Array.isArray(arr)) { root.sotaStale = true; return }
-          arr = root.boundedList(arr, 120)
-          var out = Ham.reconcileSotaSpots(arr)
-          for (var i = 0; i < out.length; i++) {
-            out[i].place = root.safe(out[i].place, 40)
-            root.applyCachedSotaGeo(out[i])
-          }
-          root.sotaSpots = out
-          root.lastSotaSuccessMs = Date.now()
-          root.sotaStale = false
-          root.queueSotaGeo(out)
-        } catch (e) { root.sotaStale = true /* keep the previous list */ }
+          if (!root.fresh(2)) return
+          try {
+            var arr = root.parseBounded(text)
+            if (!arr || !Array.isArray(arr)) { root.sotaStale = true; return }
+            arr = root.boundedList(arr, 120)
+            var out = Ham.reconcileSotaSpots(arr)
+            for (var i = 0; i < out.length; i++) {
+              out[i].place = root.safe(out[i].place, 40)
+              root.applyCachedSotaGeo(out[i])
+            }
+            root.sotaSpots = out
+            root.lastSotaSuccessMs = Date.now()
+            root.sotaStale = false
+            root.queueSotaGeo(out)
+          } catch (e) { root.sotaStale = true /* keep the previous list */ }
+        } finally { root.guardedStreamFinished(2) }
       }
     }
   }
@@ -723,39 +955,17 @@ Panel {
   Process {
     id: sotaGeoProc
     command: ["true"]
-    onExited: Qt.callLater(root.finishSotaGeo)
+    onExited: function (exitCode, exitStatus) {
+      root.sotaGeoExitCode = exitCode
+      root.sotaGeoExitSeen = true
+      root.tryFinishSotaGeo()
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var key = root.sotaGeoCurrent
-        if (key === "") return
-        try {
-          var d = root.parseBounded(text)
-          if (Array.isArray(d)) d = d.length ? d[0] : null
-          if (!d) return
-          var lat = parseFloat(String(d.latitude === null || d.latitude === undefined ? "" : d.latitude))
-          var lon = parseFloat(String(d.longitude === null || d.longitude === undefined ? "" : d.longitude))
-          if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return
-          var cache = root.copyMap(root.sotaGeoCache)
-          var order = root.sotaGeoCacheOrder.slice(0)
-          var cacheKey = "k:" + key
-          if (!cache[cacheKey]) order.push(cacheKey)
-          while (order.length > 512) {
-            var expired = order.shift()
-            delete cache[expired]
-          }
-          cache[cacheKey] = { lat: lat, lon: lon }
-          root.sotaGeoCache = cache
-          root.sotaGeoCacheOrder = order
-          var retry = root.copyMap(root.sotaGeoRetryAfter)
-          delete retry[cacheKey]
-          root.sotaGeoRetryAfter = retry
-          var list = root.sotaSpots.slice(0)
-          for (var i = 0; i < list.length; i++) {
-            if (list[i].geoKey === key) { list[i].lat = lat; list[i].lon = lon }
-          }
-          root.sotaSpots = list
-        } catch (e) { /* retry naturally if the summit is spotted again */ }
+        root.sotaGeoStreamText = String(text || "")
+        root.sotaGeoStreamDone = true
+        root.tryFinishSotaGeo()
       }
     }
   }
@@ -1061,6 +1271,7 @@ Panel {
 
         // ---- Spots ----
         Column {
+          id: spotsColumn
           visible: root.view === "spots"
           width: parent.width
           spacing: Style.space(6)
@@ -1095,12 +1306,12 @@ Panel {
               onClicked: root.setSpotSourceFilter("all")
             }
             FilterChip {
-              label: "POTA " + root.visiblePotaCount
+              label: "POTA " + root.totalPotaCount
               selected: root.spotUiSource === "pota"
               onClicked: root.setSpotSourceFilter("pota")
             }
             FilterChip {
-              label: "SOTA " + root.visibleSotaCount
+              label: "SOTA " + root.totalSotaCount
               selected: root.spotUiSource === "sota"
               onClicked: root.setSpotSourceFilter("sota")
             }
@@ -1157,10 +1368,22 @@ Panel {
             width: parent.width
             visible: root.displaySpots.length > 0
             readonly property real rowHeight: Style.space(34)
-            readonly property real maxHeight: Math.max(
-              Style.space(102),
-              Math.min(Style.space(374), panel.availableCardHeight > 0 ? panel.availableCardHeight * 0.50 : Style.space(374)))
-            height: visible ? Math.min(root.displaySpots.length * rowHeight, maxHeight) : 0
+            readonly property real naturalHeight: root.displaySpots.length * rowHeight
+            readonly property real maxHeight: {
+              if (panel.availableCardHeight <= 0) return naturalHeight
+
+              var above = spotsColumn.y + spotListFrame.y
+              var below = content.spacing + footerAttribution.implicitHeight
+              return Math.max(
+                0,
+                panel.availableCardHeight
+                  - panel.verticalContentInset
+                  - above
+                  - below
+              )
+	    }
+
+            height: visible ? Math.min(naturalHeight, maxHeight) : 0
 
             ListView {
               id: spotList
@@ -1178,6 +1401,13 @@ Panel {
                 width: ListView.view ? ListView.view.width : 0
                 height: spotListFrame.rowHeight
                 readonly property string rowGrade: root.spotGrade(modelData)
+
+                Rectangle {
+                  anchors.fill: parent
+                  radius: Style.space(3)
+                  color: Color.accent
+                  opacity: clickArea.pressed ? 0.14 : (clickArea.containsMouse ? 0.045 : 0)
+                }
 
                 Rectangle {
                   anchors.left: parent.left
@@ -1204,6 +1434,7 @@ Panel {
                   Row {
                     width: parent.width
                     spacing: Style.space(7)
+                    clip: true
                     Text {
                       textFormat: Text.PlainText
                       width: Style.space(82)
@@ -1241,7 +1472,10 @@ Panel {
                     }
                     Text {
                       textFormat: Text.PlainText
-                      width: Math.max(Style.space(30), parent.width - Style.space(240))
+                      // Fill exactly the remainder after the preceding columns
+                      // and Row spacing. Using this child's positioned x avoids
+                      // duplicated width arithmetic and cannot overflow the row.
+                      width: Math.max(0, parent.width - x)
                       text: root.distanceText(sp.modelData)
                       color: Color.muted
                       font.family: Style.font.family
@@ -1266,8 +1500,10 @@ Panel {
                 }
 
                 MouseArea {
+                  id: clickArea
                   anchors.fill: parent
                   enabled: root.spotUrl(sp.modelData) !== ""
+                  hoverEnabled: true
                   cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                   onClicked: root.openSpot(sp.modelData)
                 }
@@ -1355,6 +1591,7 @@ Panel {
         }
 
         Text {
+          id: footerAttribution
           textFormat: Text.PlainText
           width: parent.width
           text: "Conditions from N0NBH (hamqsl.com); spots from POTA and SOTA."

@@ -307,7 +307,11 @@ function greyLine(now, lat, lon) {
 function nextSolarEvent(now, lat, lon) {
   var day = 86400000
   var best = null
-  for (var i = 0; i <= 2; i++) {
+  // solarEvents() chooses a Julian cycle from the UTC timestamp.  At western
+  // longitudes, local evening is already the next UTC date, so the local-day
+  // sunset can belong to cycle n-1.  Include that cycle or an afternoon in
+  // Hawaii/California can incorrectly skip straight to tomorrow's sunrise.
+  for (var i = -1; i <= 2; i++) {
     var ev = solarEvents(new Date(now.getTime() + i * day), lat, lon, -0.833)
     if (!ev || ev.always) continue
     var candidates = [
@@ -356,6 +360,17 @@ function cardinal(deg) {
 
 // ---- Spots -----------------------------------------------------------------
 
+// Both feeds describe timestamps as UTC, but historical/current payloads differ
+// on whether they include an explicit Z/offset. Add Z only when the source is
+// timezone-less; appending it to an already-offset timestamp would make a valid
+// ISO-8601 value unparsable.
+function parseSpotTime(value) {
+  var text = String(value === null || value === undefined ? "" : value).replace(/^\s+|\s+$/g, "")
+  if (text === "") return NaN
+  if (!/(?:Z|[+\-][0-9]{2}:?[0-9]{2})$/i.test(text)) text += "Z"
+  return Date.parse(text)
+}
+
 // POTA and SOTA describe the same event with different field names. One shape
 // downstream keeps the panel from caring which feed a row came from.
 function normalisePotaSpot(s, here) {
@@ -377,7 +392,7 @@ function normalisePotaSpot(s, here) {
     band: bandFor(s.frequency),
     ref: String(s.reference || "").toUpperCase().replace(/[^A-Z0-9\-]/g, "").slice(0, 12),
     place: String(s.parkName || s.name || ""),
-    at: s.spotTime ? Date.parse(String(s.spotTime).replace(/Z?$/, "Z")) : NaN,
+    at: parseSpotTime(s.spotTime),
     lat: lat, lon: lon,
     geoKey: ""
   }
@@ -413,7 +428,7 @@ function normaliseSotaSpot(s, here) {
     band: bandFor(s.frequency),
     ref: fullRef.slice(0, 20),
     place: String(s.summitName || s.summitDetails || ""),
-    at: s.timeStamp ? Date.parse(String(s.timeStamp).replace(/Z?$/, "Z")) : NaN,
+    at: parseSpotTime(s.timeStamp),
     lat: lat, lon: lon,
     spotType: type,
     epoch: String(s.epoch || "").replace(/[^A-Za-z0-9\-]/g, "").slice(0, 64),
@@ -470,19 +485,51 @@ function reconcileSotaSpots(rows) {
 function sortSpots(spots, here) {
   var out = (spots || []).slice(0)
   var useDistance = here && isFinite(Number(here.lat)) && isFinite(Number(here.lon))
+  var hlat = useDistance ? Number(here.lat) : NaN
+  var hlon = useDistance ? Number(here.lon) : NaN
+
+  // Compute the expensive great-circle values once per spot per station
+  // location, not O(N log N) times from inside the sort comparator.  These are
+  // presentation fields on already-normalised ephemeral spot objects; every
+  // call refreshes them, so changing the station location cannot leave stale
+  // distances behind.
+  for (var i = 0; i < out.length; i++) {
+    var s = out[i]
+    if (useDistance && s && isFinite(s.lat) && isFinite(s.lon)) {
+      s.distanceKm = distanceKm(hlat, hlon, Number(s.lat), Number(s.lon))
+      s.bearingDeg = bearingDeg(hlat, hlon, Number(s.lat), Number(s.lon))
+    } else if (s) {
+      s.distanceKm = NaN
+      s.bearingDeg = NaN
+    }
+  }
+
   out.sort(function (a, b) {
     if (useDistance) {
-      var ad = isFinite(a.lat) && isFinite(a.lon)
-        ? distanceKm(Number(here.lat), Number(here.lon), Number(a.lat), Number(a.lon)) : Infinity
-      var bd = isFinite(b.lat) && isFinite(b.lon)
-        ? distanceKm(Number(here.lat), Number(here.lon), Number(b.lat), Number(b.lon)) : Infinity
+      var ad = a && isFinite(a.distanceKm) ? Number(a.distanceKm) : Infinity
+      var bd = b && isFinite(b.distanceKm) ? Number(b.distanceKm) : Infinity
       if (ad !== bd) return ad - bd
     }
-    var at = isFinite(a.at) ? a.at : 0
-    var bt = isFinite(b.at) ? b.at : 0
+    var at = a && isFinite(a.at) ? a.at : 0
+    var bt = b && isFinite(b.at) ? b.at : 0
     return bt - at
   })
   return out
+}
+
+// Failure policy for the SOTA summit-coordinate enrichment path.  Invalid, missing or
+// retired summit requests are terminal for this shell session; transport/server errors
+// back off exponentially, while rate/auth failures also pause the whole queue
+// so one bad response cannot fan out across dozens of summit references.
+function sotaGeoFailurePolicy(status, attempt) {
+  var code = Number(status)
+  var n = Math.max(1, Math.min(8, Number(attempt) || 1))
+  if (code === 400 || code === 404 || code === 410 || code === 422) return { permanent: true, retryMs: 0, globalMs: 0 }
+  if (code === 401 || code === 403) return { permanent: false, retryMs: 1800000, globalMs: 1800000 }
+  if (code === 429) return { permanent: false, retryMs: 900000, globalMs: 900000 }
+  var retry = Math.min(3600000, 300000 * Math.pow(2, n - 1))
+  var global = (code === 0 || code === 408 || code >= 500) ? Math.min(retry, 300000) : 0
+  return { permanent: false, retryMs: retry, globalMs: global }
 }
 
 function minutesAgo(ms, nowMs) {

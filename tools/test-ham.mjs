@@ -60,6 +60,9 @@ eq("SOTA style on 2m", H.bandFor(145.5), "2m")
 near("kHz passes through", H.toKHz("14074"), 14074, 0.01)
 near("MHz is promoted", H.toKHz(14.074), 14074, 0.01)
 eq("formatted for display", H.formatFreq("7074.0"), "7.074")
+eq("timezone-less spot timestamps are UTC", H.parseSpotTime("2026-09-04T04:14:02"), Date.parse("2026-09-04T04:14:02Z"))
+eq("explicit Z spot timestamps stay valid", H.parseSpotTime("2026-09-04T04:14:02.123Z"), Date.parse("2026-09-04T04:14:02.123Z"))
+eq("offset spot timestamps stay valid", H.parseSpotTime("2026-09-04T06:14:02+02:00"), Date.parse("2026-09-04T06:14:02+02:00"))
 
 console.log("\n# the solar XML")
 const xml = `<solar><solardata>
@@ -193,6 +196,17 @@ const nextSun = H.nextSolarEvent(afterRise, 51.5074, -0.1278)
 eq("after sunrise, sunset is the next transition", nextSun.kind, "sunset")
 check("the next transition is in the future", nextSun.delta > 0, `${nextSun.delta} ms`)
 
+// Western longitudes cross into the next UTC date before local sunset. The
+// previous Julian cycle must still be considered or the near sunset disappears
+// and tomorrow's sunrise wins. Pin the regression to 30 minutes before a real
+// computed Honolulu sunset rather than to a wall-clock timezone assumption.
+const honoluluNoon = new Date(Date.UTC(2026, 8, 4, 0, 0))
+const honoluluEvents = H.solarEvents(honoluluNoon, 21.3069, -157.8583, -0.833)
+const beforeHonoluluSunset = new Date(honoluluEvents.set.getTime() - 30 * 60000)
+const honoluluNext = H.nextSolarEvent(beforeHonoluluSunset, 21.3069, -157.8583)
+eq("western longitude keeps the upcoming local sunset", honoluluNext.kind, "sunset")
+near("Honolulu sunset remains about 30 minutes away", honoluluNext.delta / 60000, 30, 0.01)
+
 console.log("\n# geography")
 near("a degree of latitude", H.distanceKm(0, 0, 1, 0), 111.2, 0.5)
 near("London to New York", H.distanceKm(51.5074, -0.1278, 40.7128, -74.0060), 5570, 40)
@@ -243,6 +257,23 @@ const byDistance = H.sortSpots([
   { call: "near", lat: 0.25, lon: 0, at: 1000 }
 ], { lat: 0, lon: 0 })
 eq("with a station location, nearest spot sorts first", byDistance.map(s => s.call).join(","), "near,far,unknown")
+check("distance is precomputed onto located spots", isFinite(byDistance[0].distanceKm) && isFinite(byDistance[1].distanceKm))
+check("bearing is precomputed onto located spots", isFinite(byDistance[0].bearingDeg) && isFinite(byDistance[1].bearingDeg))
+check("unknown locations keep no computed distance", !isFinite(byDistance[2].distanceKm))
+const movedStation = H.sortSpots(byDistance, { lat: 3, lon: 0 })
+check("changing station location refreshes cached presentation distance", movedStation.find(s => s.call === "far").distanceKm < movedStation.find(s => s.call === "near").distanceKm)
+
+const badSummit = H.sotaGeoFailurePolicy(400, 1)
+check("SOTA invalid summit request is terminal for the session", badSummit.permanent && badSummit.retryMs === 0)
+const missingSummit = H.sotaGeoFailurePolicy(404, 1)
+check("SOTA 404 is a terminal session miss", missingSummit.permanent && missingSummit.retryMs === 0)
+const rateLimited = H.sotaGeoFailurePolicy(429, 1)
+check("SOTA 429 pauses both key and queue", rateLimited.retryMs === 900000 && rateLimited.globalMs === 900000)
+const retry1 = H.sotaGeoFailurePolicy(500, 1)
+const retry3 = H.sotaGeoFailurePolicy(500, 3)
+check("transient SOTA failures back off exponentially", retry1.retryMs === 300000 && retry3.retryMs === 1200000)
+check("server failures pause queue fan-out", retry1.globalMs > 0)
+
 eq("age wording", H.formatAge(45), "45m")
 eq("age wording, hours", H.formatAge(90), "1h30m")
 
@@ -250,7 +281,7 @@ if (!process.argv.includes("--offline")) {
   console.log("\n# live feeds")
   const get = async (url, asText) => {
     const r = await fetch(url, { signal: AbortSignal.timeout(15000),
-                                 headers: { "User-Agent": "omarchy-hamradio/0.3" } })
+                                 headers: { "User-Agent": "omarchy-hamradio/0.3.1" } })
     return asText ? await r.text() : await r.json()
   }
   try {
