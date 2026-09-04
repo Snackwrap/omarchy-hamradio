@@ -52,11 +52,11 @@ eq("a gap between bands is no band", H.bandFor(9000), "")
 eq("nonsense is no band", H.bandFor("banana"), "")
 
 console.log("\n# the two feeds disagree about units")
-// POTA sends kHz as a string, SOTA sends MHz as a number.
+// POTA sends kHz as a string; an MHz number is also accepted.
 eq("POTA style, kHz string", H.bandFor("7074.0"), "40m")
-eq("SOTA style, MHz number", H.bandFor(7.14), "40m")
-eq("SOTA style on 20m", H.bandFor(14.235), "20m")
-eq("SOTA style on 2m", H.bandFor(145.5), "2m")
+eq("an MHz frequency", H.bandFor(7.14), "40m")
+eq("an MHz frequency on 20m", H.bandFor(14.235), "20m")
+eq("an MHz frequency on 2m", H.bandFor(145.5), "2m")
 near("kHz passes through", H.toKHz("14074"), 14074, 0.01)
 near("MHz is promoted", H.toKHz(14.074), 14074, 0.01)
 eq("formatted for display", H.formatFreq("7074.0"), "7.074")
@@ -225,26 +225,6 @@ near("POTA latitude is retained", pota.lat, 50.3, 0.0001)
 near("POTA longitude is retained", pota.lon, 8.8, 0.0001)
 const potaGrid = H.normalisePotaSpot({ activator: "W1AW", frequency: "14074", reference: "US-0001", grid6: "FN31pr" })
 check("POTA grid is a coordinate fallback", isFinite(potaGrid.lat) && isFinite(potaGrid.lon), `${potaGrid.lat},${potaGrid.lon}`)
-const sota = H.normaliseSotaSpot({ activatorCallsign: "VK2IO/P", frequency: 7.14, mode: "SSB",
-                                   associationCode: "VK2", summitCode: "CT-001" })
-eq("SOTA MHz becomes the right band", sota.band, "40m")
-eq("a stroke in the callsign survives", sota.call, "VK2IO/P")
-eq("SOTA reference includes its association", sota.ref, "VK2/CT-001")
-const sotaNew = H.normaliseSotaSpot({ activatorCallsign: "ZL/VK3BCM", frequency: 14.31, mode: "SSB",
-                                      summitCode: "ZL1/AK-027", summitName: "Pukekohe Hill", type: null })
-eq("new SOTA schema carries the full summit reference", sotaNew.ref, "ZL1/AK-027")
-eq("SOTA QRT records retain their control type", H.normaliseSotaSpot({ activatorCallsign: "W1AW", summitCode: "W1/AA-001", type: "QRT" }).spotType, "QRT")
-eq("SOTA TEST records retain their control type", H.normaliseSotaSpot({ activatorCallsign: "W1AW", summitCode: "W1/AA-001", type: "TEST" }).spotType, "TEST")
-const reconciledSota = H.reconcileSotaSpots([
-  { activatorCallsign: "W1AW", summitCode: "W1/AA-001", frequency: 14.250, mode: "SSB", type: "QRT", timeStamp: "2026-09-03T20:05:00Z" },
-  { activatorCallsign: "W1AW", summitCode: "W1/AA-001", frequency: 14.250, mode: "SSB", type: null, timeStamp: "2026-09-03T20:00:00Z" },
-  { activatorCallsign: "N0CALL", summitCode: "W0C/FR-001", frequency: 7.032, mode: "CW", type: "TEST", timeStamp: "2026-09-03T20:04:00Z" },
-  { activatorCallsign: "K1ABC/P", summitCode: "W1/AM-001", frequency: 14.062, mode: "CW", type: null, timeStamp: "2026-09-03T20:03:00Z" },
-  { activatorCallsign: "K1ABC/P", summitCode: "W1/AM-001", frequency: 7.032, mode: "CW", type: "NORMAL", timeStamp: "2026-09-03T19:55:00Z" }
-])
-eq("QRT tombstones older spots and TEST is excluded", reconciledSota.map(s => s.call).join(","), "K1ABC/P")
-eq("only the newest active SOTA spot for a station/summit remains", reconciledSota[0].band, "20m")
-eq("the deprecated placeholder row is dropped", H.normaliseSotaSpot({ activatorCallsign: "DEPRECATED" }), null)
 eq("a spot with no callsign is dropped", H.normalisePotaSpot({ frequency: "7074" }), null)
 
 const sorted = H.sortSpots([{ at: 1000 }, { at: 3000 }, { at: 2000 }])
@@ -304,19 +284,6 @@ if (!process.argv.includes("--offline")) {
           `${located.length}/${mapped.length} located`)
   } catch (e) { console.log(`  skip  POTA unavailable (${e.message})`) }
 
-  try {
-    const spots = await get("https://api-db2.sota.org.uk/api/spots/20/all/all")
-    check("SOTA returned spots", Array.isArray(spots) && spots.length > 0, `${spots.length} spots`)
-    const active = H.reconcileSotaSpots(spots)
-    check("SOTA reconciliation yields active spots", active.length > 0, `${active.length} active`)
-    // The whole distance feature rests on this feed carrying coordinates itself.
-    // If that ever stops being true the spots simply lose their distance, and
-    // this check is how we find out rather than wondering why the column emptied.
-    const sotaLocated = active.filter(s => isFinite(s.lat) && isFinite(s.lon))
-    check("SOTA spots carry their own summit coordinates",
-          active.length > 0 && sotaLocated.length === active.length,
-          `${sotaLocated.length}/${active.length} located`)
-  } catch (e) { console.log(`  skip  SOTA unavailable (${e.message})`) }
 }
 
 console.log(`\n${failures ? `${failures} FAILED` : "all checks passed"}\n`)

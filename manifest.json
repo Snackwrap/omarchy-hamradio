@@ -7,17 +7,17 @@
   "license": "MIT",
   "homepage": "https://github.com/Snackwrap/omarchy-hamradio",
   "repository": "https://github.com/Snackwrap/omarchy-hamradio",
-  "description": "HF band conditions in the Omarchy bar: which band is open now, day and night, with the solar and geomagnetic numbers behind it, your grey-line windows on a 24-hour strip, and live POTA and SOTA activations sorted by distance from your grid square.",
-  "keywords": ["ham radio", "amateur radio", "hf", "propagation", "pota", "sota", "solar", "grey line", "bar", "quickshell"],
+  "description": "HF band conditions in the Omarchy bar: which band is open now, day and night, with the solar and geomagnetic numbers behind it, your grey-line windows on a 24-hour strip, and live POTA activations sorted by distance from your grid square.",
+  "keywords": ["ham radio", "amateur radio", "hf", "propagation", "pota", "solar", "grey line", "bar", "quickshell"],
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Ham Radio",
-    "description": "Band conditions, grey-line timing and live POTA/SOTA spots.",
+    "description": "Band conditions, grey-line timing and live POTA spots.",
     "category": "Info",
-    "aliases": ["ham", "amateur radio", "hf", "propagation", "pota", "sota", "bands"],
+    "aliases": ["ham", "amateur radio", "hf", "propagation", "pota", "bands"],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
@@ -25,7 +25,7 @@
       "latitude": "",
       "longitude": "",
       "pillContent": "band",
-      "spotSource": "both",
+      "spotSource": "pota",
       "spotBands": "",
       "defaultTab": "bands",
       "greyLineAlert": false,
@@ -70,12 +70,10 @@
         "type": "enum",
         "label": "Spots from",
         "options": [
-          { "value": "both", "label": "POTA and SOTA" },
-          { "value": "pota", "label": "POTA only" },
-          { "value": "sota", "label": "SOTA only" },
+          { "value": "pota", "label": "POTA" },
           { "value": "off", "label": "Do not fetch spots" }
         ],
-        "defaultValue": "both"
+        "defaultValue": "pota"
       },
       {
         "key": "spotBands",

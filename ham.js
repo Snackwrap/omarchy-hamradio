@@ -95,7 +95,7 @@ var BANDS = [
 ]
 
 // Spot feeds are inconsistent about units: POTA sends kHz as a string
-// ("7074.0"), SOTA sends MHz as a number (7.14). Anything that looks like a
+// ("7074.0"); an MHz number (7.14) is also accepted. Anything that looks like a
 // plausible MHz value for an amateur band is promoted.
 function toKHz(freq) {
   var f = Number(String(freq === null || freq === undefined ? "" : freq).replace(/[^0-9.]/g, ""))
@@ -371,8 +371,7 @@ function parseSpotTime(value) {
   return Date.parse(text)
 }
 
-// POTA and SOTA describe the same event with different field names. One shape
-// downstream keeps the panel from caring which feed a row came from.
+// Normalise a POTA spot into the one row shape the panel renders.
 function normalisePotaSpot(s, here) {
   if (!s) return null
   var call = String(s.activator || "").toUpperCase().replace(/[^A-Z0-9\/]/g, "").slice(0, 16)
@@ -395,83 +394,6 @@ function normalisePotaSpot(s, here) {
     at: parseSpotTime(s.spotTime),
     lat: lat, lon: lon
   }
-}
-
-function normaliseSotaSpot(s, here) {
-  if (!s) return null
-  var call = String(s.activatorCallsign || "").toUpperCase().replace(/[^A-Z0-9\/]/g, "").slice(0, 16)
-  if (call === "" || call === "DEPRECATED") return null
-  var rawRef = String(s.summitCode || "").toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 20)
-  var assoc = String(s.associationCode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8)
-  var summit = rawRef
-  var slash = rawRef.indexOf("/")
-  if (slash > 0) {
-    assoc = rawRef.slice(0, slash).replace(/[^A-Z0-9]/g, "").slice(0, 8)
-    summit = rawRef.slice(slash + 1).replace(/[^A-Z0-9\-]/g, "").slice(0, 12)
-  } else {
-    summit = rawRef.replace(/[^A-Z0-9\-]/g, "").slice(0, 12)
-  }
-  var fullRef = assoc !== "" && summit !== "" ? assoc + "/" + summit : rawRef
-  var lat = parseFloat(String(s.latitude === null || s.latitude === undefined ? "" : s.latitude))
-  var lon = parseFloat(String(s.longitude === null || s.longitude === undefined ? "" : s.longitude))
-  if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
-    lat = NaN; lon = NaN
-  }
-  var type = String(s.type || "NORMAL").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 12)
-  if (type === "") type = "NORMAL"
-  return {
-    source: "SOTA",
-    call: call,
-    freq: toKHz(s.frequency),
-    mode: String(s.mode || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8),
-    band: bandFor(s.frequency),
-    ref: fullRef.slice(0, 20),
-    place: String(s.summitName || s.summitDetails || ""),
-    at: parseSpotTime(s.timeStamp),
-    lat: lat, lon: lon,
-    spotType: type,
-    epoch: String(s.epoch || "").replace(/[^A-Za-z0-9\-]/g, "").slice(0, 64)
-  }
-}
-
-// SOTA's current spot endpoint is a recent event stream, not a pre-reconciled
-// list of stations. TEST is not an activation. QRT is a tombstone for an older
-// spot from the same activator/summit; simply hiding the QRT row would let that
-// older spot reappear. Keep only the newest still-active record for each key.
-function reconcileSotaSpots(rows) {
-  var normalised = []
-  for (var i = 0; i < (rows || []).length; i++) {
-    var s = normaliseSotaSpot(rows[i])
-    if (s) normalised.push(s)
-  }
-  normalised.sort(function (a, b) {
-    var at = isFinite(a.at) ? a.at : 0
-    var bt = isFinite(b.at) ? b.at : 0
-    return bt - at
-  })
-
-  var closed = Object.create(null)
-  var seen = Object.create(null)
-  var out = []
-  for (var j = 0; j < normalised.length; j++) {
-    var spot = normalised[j]
-    var callKey = "c:" + spot.call
-    var exactKey = "r:" + spot.call + "|" + spot.ref
-    var key = spot.ref !== "" ? exactKey : callKey
-
-    if (spot.spotType === "TEST") continue
-    if (spot.spotType === "QRT") {
-      closed[key] = true
-      // A QRT without a usable summit reference still closes that activator's
-      // older entries; with a reference, do not hide an unrelated summit.
-      if (spot.ref === "") closed[callKey] = true
-      continue
-    }
-    if (closed[key] || closed[callKey] || seen[key]) continue
-    seen[key] = true
-    out.push(spot)
-  }
-  return out
 }
 
 // With a local position, nearest activation first.  Unknown coordinates sort

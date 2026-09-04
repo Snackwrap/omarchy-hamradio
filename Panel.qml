@@ -6,7 +6,7 @@ import qs.Ui
 import "ham.js" as Ham
 
 // Pulls HF band conditions from N0NBH's solar feed and live activations from
-// POTA and SOTA, works out which half of the day/night table applies where the
+// POTA, works out which half of the day/night table applies where the
 // operator actually is, exposes a `label`/`tooltip`/`gradeColor` for the bar
 // pill, and renders the tabbed popup.
 //
@@ -39,7 +39,6 @@ Panel {
 
   readonly property string solarUrl: "https://www.hamqsl.com/solarxml.php"
   readonly property string potaUrl: "https://api.pota.app/spot/activator"
-  readonly property string sotaUrl: "https://api-db2.sota.org.uk/api/spots/20/all/all"
   readonly property string ua: "omarchy-hamradio/0.3.1"
 
   // ---- Settings ---------------------------------------------------------
@@ -203,18 +202,14 @@ Panel {
   // ---- Fetched state ----------------------------------------------------
   property var solar: null
   property var potaSpots: []
-  property var sotaSpots: []
   property string lastError: ""
   property bool loading: false
   property bool potaStale: false
-  property bool sotaStale: false
   property double lastPotaSuccessMs: 0
-  property double lastSotaSuccessMs: 0
 
   // These are intentionally session-only.  The manifest/CLI settings remain
   // the persistent policy; these chips are just a fast way to focus the list
   // while the popup is open.
-  property string spotUiSource: "all"
   property string spotUiBand: ""
 
   // Detached browser launches must not block a cold-starting browser, but the
@@ -232,22 +227,15 @@ Panel {
 
   readonly property var spots: {
     var all = []
-    if (spotSource === "both" || spotSource === "pota") all = all.concat(potaSpots)
-    if (spotSource === "both" || spotSource === "sota") all = all.concat(sotaSpots)
+    if (spotSource !== "off") all = all.concat(potaSpots)
     if (bandFilter.length) {
       all = all.filter(function (s) { return bandFilter.indexOf(String(s.band).toLowerCase()) >= 0 })
     }
     return Ham.sortSpots(all, hasSite ? { lat: siteLat, lon: siteLon } : null)
   }
 
-  readonly property var sourceSpots: {
-    if (spotUiSource === "all") return spots
-    var wantSource = spotUiSource.toUpperCase()
-    return spots.filter(function (s) { return String(s.source).toUpperCase() === wantSource })
-  }
-
   readonly property var displaySpots: {
-    var out = sourceSpots
+    var out = spots
     if (spotUiBand === "__other__") {
       out = out.filter(function (s) { return String(s.band || "") === "" })
     } else if (spotUiBand !== "") {
@@ -262,8 +250,8 @@ Panel {
   // buckets instead of silently meaning "HF plus everything else".  Anything
   // outside the known band plan remains reachable through OTHER.
   readonly property var spotBandOptions: {
-    var buckets = Ham.spotBandBuckets(sourceSpots)
-    var out = [{ band: "", label: "ALL BANDS", count: sourceSpots.length }]
+    var buckets = Ham.spotBandBuckets(spots)
+    var out = [{ band: "", label: "ALL BANDS", count: spots.length }]
     for (var i = 0; i < buckets.length; i++) {
       var band = buckets[i].band
       out.push({ band: band, label: band === "__other__" ? "OTHER" : band, count: buckets[i].count })
@@ -281,18 +269,10 @@ Panel {
   }
 
   readonly property int totalPotaCount: spots.filter(function (s) { return s.source === "POTA" }).length
-  readonly property int totalSotaCount: spots.filter(function (s) { return s.source === "SOTA" }).length
   readonly property int visiblePotaCount: displaySpots.filter(function (s) { return s.source === "POTA" }).length
-  readonly property int visibleSotaCount: displaySpots.filter(function (s) { return s.source === "SOTA" }).length
-  readonly property double lastSpotSuccessMs:
-    spotSource === "pota" ? lastPotaSuccessMs
-    : (spotSource === "sota" ? lastSotaSuccessMs
-       : (spotSource === "both" ? Math.max(lastPotaSuccessMs, lastSotaSuccessMs) : 0))
-  readonly property bool spotsStale:
-    (spotSource === "both" && (potaStale || sotaStale))
-    || (spotSource === "pota" && potaStale)
-    || (spotSource === "sota" && sotaStale)
-  readonly property bool refreshing: solarProc.running || potaProc.running || sotaProc.running
+  readonly property double lastSpotSuccessMs: spotSource === "off" ? 0 : lastPotaSuccessMs
+  readonly property bool spotsStale: spotSource !== "off" && potaStale
+  readonly property bool refreshing: solarProc.running || potaProc.running
 
   // Frequencies only, for the spectrum's ticks. Quick source/band filters are
   // presentation state, so the spectrum follows the same view the operator is
@@ -340,7 +320,6 @@ Panel {
     var ref = String(s.ref).toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 20)
     if (ref === "") return ""
     if (s.source === "POTA") return "https://pota.app/#/park/" + ref.replace(/\//g, "")
-    if (s.source === "SOTA" && ref.indexOf("/") > 0) return "https://summits.sota.org.uk/summit/" + ref
     return ""
   }
 
@@ -360,12 +339,6 @@ Panel {
     // tracked Process would make the next click look "busy" and drop it; the
     // same-URL debounce above only collapses double-clicks.
     Util.execArgv(["xdg-open", url])
-  }
-
-  function setSpotSourceFilter(value) {
-    spotUiSource = value
-    spotUiBand = ""
-    Qt.callLater(function () { if (spotList) spotList.positionViewAtBeginning() })
   }
 
   function setSpotBandFilter(value) {
@@ -487,13 +460,13 @@ Panel {
   // no longer matches is discarded rather than assigned to whatever is selected
   // by the time it lands.
   property int fetchGen: 0
-  property var procGen: [0, 0, 0]
+  property var procGen: [0, 0]
 
-  readonly property var guardedProcs: [solarProc, potaProc, sotaProc]
-  readonly property var guardLimits: [20, 20, 20]
-  property var guardStarted: [0, 0, 0]
-  property var guardActive: [false, false, false]
-  property var guardStopping: [false, false, false]
+  readonly property var guardedProcs: [solarProc, potaProc]
+  readonly property var guardLimits: [20, 20]
+  property var guardStarted: [0, 0]
+  property var guardActive: [false, false]
+  property var guardStopping: [false, false]
   property var guardExitSeen: [false, false, false]
   property var guardStreamDone: [false, false, false]
   property double weatherStartedMs: 0
@@ -573,8 +546,7 @@ Panel {
 
   function refresh() {
     if (!solarProc.running) { loading = true; launch(0, fetchArgs(20, solarUrl)) }
-    if (spotSource === "both" || spotSource === "pota") { if (!potaProc.running) launch(1, fetchArgs(20, potaUrl)) }
-    if (spotSource === "both" || spotSource === "sota") { if (!sotaProc.running) launch(2, fetchArgs(20, sotaUrl)) }
+    if (spotSource !== "off") { if (!potaProc.running) launch(1, fetchArgs(20, potaUrl)) }
   }
 
   Component.onCompleted: refresh()
@@ -666,32 +638,6 @@ Panel {
             root.potaStale = false
           } catch (e) { root.potaStale = true /* keep the previous list */ }
         } finally { root.guardedStreamFinished(1) }
-      }
-    }
-  }
-
-  Process {
-    id: sotaProc
-    command: ["true"]            // replaced at launch
-    onExited: function (exitCode, exitStatus) { root.guardedExited(2) }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try {
-          if (!root.fresh(2)) return
-          try {
-            var arr = root.parseBounded(text)
-            if (!arr || !Array.isArray(arr)) { root.sotaStale = true; return }
-            arr = root.boundedList(arr, 120)
-            var out = Ham.reconcileSotaSpots(arr)
-            for (var i = 0; i < out.length; i++) {
-              out[i].place = root.safe(out[i].place, 40)
-            }
-            root.sotaSpots = out
-            root.lastSotaSuccessMs = Date.now()
-            root.sotaStale = false
-          } catch (e) { root.sotaStale = true /* keep the previous list */ }
-        } finally { root.guardedStreamFinished(2) }
       }
     }
   }
@@ -1012,35 +958,13 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             text: root.spotSource === "off" ? ""
-              : ("POTA " + root.visiblePotaCount + "  ·  SOTA " + root.visibleSotaCount
+              : ("POTA " + root.visiblePotaCount
                  + "  ·  " + root.spotFreshness()
                  + (root.spotsStale ? "  ·  STALE SOURCE" : ""))
             color: root.spotsStale ? "#d9a441" : Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.space(10)
             wrapMode: Text.WordWrap
-          }
-
-          Flow {
-            width: parent.width
-            height: implicitHeight
-            spacing: Style.space(5)
-
-            FilterChip {
-              label: "ALL " + root.spots.length
-              selected: root.spotUiSource === "all"
-              onClicked: root.setSpotSourceFilter("all")
-            }
-            FilterChip {
-              label: "POTA " + root.totalPotaCount
-              selected: root.spotUiSource === "pota"
-              onClicked: root.setSpotSourceFilter("pota")
-            }
-            FilterChip {
-              label: "SOTA " + root.totalSotaCount
-              selected: root.spotUiSource === "sota"
-              onClicked: root.setSpotSourceFilter("sota")
-            }
           }
 
           Flow {
@@ -1077,8 +1001,8 @@ Panel {
             visible: root.displaySpots.length === 0
             width: parent.width
             text: root.spotSource === "off"
-              ? "Spot fetching is turned off. Set spotSource to pota, sota or both to see live activations."
-              : (root.spotUiSource !== "all" || root.spotUiBand !== ""
+              ? "Spot fetching is turned off. Set spotSource to pota to see live activations."
+              : (root.spotUiBand !== ""
                  ? "No activations match the quick filters right now."
                  : (root.bandFilter.length
                  ? "No activations on those bands right now."
@@ -1320,7 +1244,7 @@ Panel {
           id: footerAttribution
           textFormat: Text.PlainText
           width: parent.width
-          text: "Conditions from N0NBH (hamqsl.com); spots from POTA and SOTA."
+          text: "Conditions from N0NBH (hamqsl.com); spots from POTA."
           color: Color.muted
           font.family: Style.font.family
           font.pixelSize: Style.space(10)

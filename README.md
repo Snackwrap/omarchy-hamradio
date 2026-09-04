@@ -18,17 +18,15 @@ the location your Omarchy weather widget already knows.
   picked out and the other dimmed; then the numbers that produced it — solar
   flux, sunspot number, A and K, the X-ray class, foF2 and the signal-noise
   estimate.
-- **Spots** — live POTA and SOTA activations, nearest first from your locator,
-  with source, place, age, distance/bearing, band, frequency and mode. Band chips
-  are generated from the spots actually present (HF, VHF/UHF and `OTHER` for an
+- **Spots** — live POTA activations, nearest first from your locator, with
+  place, age, distance/bearing, band, frequency and mode. Band chips are
+  generated from the spots actually present (HF, VHF/UHF and `OTHER` for an
   unmapped frequency), so `ALL BANDS` is exactly the union of the visible
   buckets. The list scrolls when it exceeds the popup. Filled row stripes are
   N0NBH Good/Fair/Poor grades; an outlined stripe means that band has no N0NBH
-  grade. Both feeds carry their own coordinates, so nothing has to be looked up
-  to place a spot; SOTA also reconciles TEST/QRT/superseded records, because its
-  feed is a recent-event stream rather than a list of who is on the air. Click a
-  row to open the corresponding POTA park or SOTA summit page; repeated clicks
-  on the same row are briefly debounced.
+  grade. The feed carries park coordinates itself, so nothing has to be looked
+  up to place a spot. Click a row to open its POTA park page; repeated clicks on
+  the same row are briefly debounced.
 - **Grey line** — today as a strip: night dark, day light, and the two grey-line
   windows picked out in amber, with a marker for now. Sunrise, sunset, and how
   long until the next window.
@@ -56,8 +54,8 @@ against itself:
   Newington is `FN31pr`, the prime meridian at the equator is `JJ00aa` — plus
   round-trips through `gridToLatLon`.
 - **The band plan** with a real frequency from each band's most-used segment,
-  including the fact that POTA sends kHz as a string and SOTA sends MHz as a
-  number, so `"7074.0"` and `7.14` must both come out as 40m.
+  including that a frequency may arrive as a kHz string or an MHz number, so
+  `"7074.0"` and `7.14` must both come out as 40m.
 - **Sunrise and sunset** against real times for a known place and date, the
   western-longitude UTC-cycle boundary, and polar day/night cases at 78° N.
 - **The solar feed** against a fixture, including that a MUF reported as `NoRpt`
@@ -65,9 +63,9 @@ against itself:
 - Then, live: the real feed has to parse, the flux has to be plausible, every
   band grade has to be a word we know, and nearly every spotted frequency has to
   land in a band. Unmapped frequencies remain visible under `OTHER` rather than
-  disappearing from `ALL BANDS`. Both live feed checks verify that
-  every spot arrives with usable coordinates, and the SOTA tests cover the
-  current spot schema and TEST/QRT reconciliation.
+  disappearing from `ALL BANDS`. The live check also verifies that every spot
+  arrives with usable park coordinates, since the distance column depends on
+  them.
 
 ```bash
 node tools/test-ham.mjs            # includes the live checks
@@ -110,7 +108,7 @@ omarchy restart shell
 | Locator | `grid` | Maidenhead square, e.g. `IO91px`. Blank uses your weather location |
 | Latitude / longitude | `latitude`, `longitude` | Override the locator |
 | Bar pill shows | `pillContent` | `band`, `sfi`, `k` or `spots` |
-| Spots from | `spotSource` | `both`, `pota`, `sota` or `off` |
+| Spots from | `spotSource` | `pota` or `off` |
 | Band filter | `spotBands` | e.g. `40m,20m`. Blank shows all |
 | Default tab | `defaultTab` | `bands`, `spots` or `greyline` |
 | Grey-line notification | `greyLineAlert` | Off by default |
@@ -165,12 +163,18 @@ Everything here is fetched from the public internet and displayed, so:
 
 Band conditions and solar values come from **N0NBH** via
 [hamqsl.com](https://www.hamqsl.com/), spots from the
-[POTA](https://pota.app) and [SOTA](https://www.sota.org.uk) APIs. None require
-a key or an account.
+[POTA](https://pota.app) API. Neither requires a key or an account.
+
+SOTA spots were shown in earlier versions and have been removed. The SOTA API is
+a private API whose terms require the developer to be a member of the SOTA
+Reflector and its API-consumers group, to register a designated point of contact,
+and to obtain prior approval for AI-assisted software. This plugin met none of
+those, so the integration was withdrawn rather than left running while the
+question was asked. It will only return with SOTA's agreement.
 
 Band condition grades are a model, not a measurement — the only way to know a
 band is open is to listen. Nothing here is a substitute for your own ears.
 
 ## License
 
-MIT. Not affiliated with or endorsed by N0NBH, POTA, SOTA, or the ARRL.
+MIT. Not affiliated with or endorsed by N0NBH, POTA, or the ARRL.
