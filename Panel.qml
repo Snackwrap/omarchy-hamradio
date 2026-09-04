@@ -40,7 +40,6 @@ Panel {
   readonly property string solarUrl: "https://www.hamqsl.com/solarxml.php"
   readonly property string potaUrl: "https://api.pota.app/spot/activator"
   readonly property string sotaUrl: "https://api-db2.sota.org.uk/api/spots/20/all/all"
-  readonly property string sotaSummitUrl: "https://api-db2.sota.org.uk/api/summits/"
   readonly property string ua: "omarchy-hamradio/0.3.1"
 
   // ---- Settings ---------------------------------------------------------
@@ -123,14 +122,6 @@ Panel {
   function boundedList(v, cap) {
     if (!v || !v.length) return []
     return v.length > cap ? v.slice(0, cap) : v
-  }
-
-  function copyMap(v) {
-    var out = {}
-    for (var k in (v || {})) {
-      if (Object.prototype.hasOwnProperty.call(v, k)) out[k] = v[k]
-    }
-    return out
   }
 
   // ---- Location ---------------------------------------------------------
@@ -225,25 +216,6 @@ Panel {
   // while the popup is open.
   property string spotUiSource: "all"
   property string spotUiBand: ""
-
-  // SOTA's spot feed identifies the summit but does not reliably carry its
-  // coordinates.  Resolve each unseen summit through the official summit API,
-  // one at a time, and cache it for the lifetime of the shell.
-  property var sotaGeoCache: ({})
-  property var sotaGeoCacheOrder: []
-  property var sotaGeoRetryAfter: ({})
-  property var sotaGeoRetryCount: ({})
-  property var sotaGeoRetryOrder: []
-  property double sotaGeoPauseUntilMs: 0
-  property var sotaGeoQueue: []
-  property string sotaGeoCurrent: ""
-  property double sotaGeoStartedMs: 0
-  property bool sotaGeoExitSeen: false
-  property bool sotaGeoStreamDone: false
-  property int sotaGeoExitCode: -1
-  property string sotaGeoStreamText: ""
-  property bool sotaGeoCancelled: false
-  property bool sotaGeoDirty: false
 
   // Detached browser launches must not block a cold-starting browser, but the
   // same row double-clicked while that browser starts should still be one user
@@ -379,10 +351,15 @@ Panel {
     if (url === lastSpotOpenUrl && now - lastSpotOpenMs < 1200) return
     lastSpotOpenUrl = url
     lastSpotOpenMs = now
-    // xdg-open may stay alive while a cold browser starts. A tracked Process
-    // would then make later clicks look "busy" and drop them, so each accepted
-    // click is detached; the same-URL debounce above only collapses double-clicks.
-    Quickshell.execDetached(["xdg-open", url])
+    // Util.execArgv, not a bare execDetached: the shell's own Commons says to
+    // prefer it for anything built from input, and its login shell keeps the
+    // PATH and session environment that xdg-open needs to hand a URL to the
+    // real browser. The constant `exec "$@"` means the URL only ever lands in a
+    // positional parameter, so bash never re-tokenizes it. It is still
+    // detached, because xdg-open stays alive while a cold browser starts and a
+    // tracked Process would make the next click look "busy" and drop it; the
+    // same-URL debounce above only collapses double-clicks.
+    Util.execArgv(["xdg-open", url])
   }
 
   function setSpotSourceFilter(value) {
@@ -594,200 +571,6 @@ Panel {
 
   function openFromHotkey() { open() }
 
-  function sotaGeoFetchArgs(seconds, url) {
-    // Summit lookups need the HTTP status so permanent misses (404/410) can be
-    // cached separately from transient transport/server failures.  Do not use
-    // -f here: it would collapse every HTTP failure into curl exit 22.
-    return ["curl", "-q", "-sS", "-A", ua,
-            "--proto", "=https",
-            "--max-time", String(seconds),
-            "--max-filesize", String(maxResponseBytes),
-            "--write-out", "\n%{http_code}",
-            url]
-  }
-
-  function parseHttpEnvelope(raw) {
-    var text = String(raw || "")
-    var m = /\n([0-9]{3})$/.exec(text)
-    if (!m) return { status: 0, body: "" }
-    var body = text.slice(0, m.index)
-    if (body.length > maxResponseBytes) body = ""
-    return { status: parseInt(m[1]), body: body }
-  }
-
-  function clearSotaGeoRetry(key) {
-    var cacheKey = "k:" + key
-    var after = copyMap(sotaGeoRetryAfter); delete after[cacheKey]; sotaGeoRetryAfter = after
-    var counts = copyMap(sotaGeoRetryCount); delete counts[cacheKey]; sotaGeoRetryCount = counts
-    var order = sotaGeoRetryOrder.slice(0)
-    var at = order.indexOf(cacheKey)
-    if (at >= 0) order.splice(at, 1)
-    sotaGeoRetryOrder = order
-  }
-
-  function storeSotaGeoCache(key, value) {
-    var cacheKey = "k:" + key
-    var cache = copyMap(sotaGeoCache)
-    var order = sotaGeoCacheOrder.slice(0)
-    if (!Object.prototype.hasOwnProperty.call(cache, cacheKey)) order.push(cacheKey)
-    while (order.length > 512) {
-      var expired = order.shift()
-      delete cache[expired]
-    }
-    cache[cacheKey] = value
-    sotaGeoCache = cache
-    sotaGeoCacheOrder = order
-    clearSotaGeoRetry(key)
-  }
-
-  function rememberSotaGeoFailure(key, status) {
-    var cacheKey = "k:" + key
-    var counts = copyMap(sotaGeoRetryCount)
-    var attempt = Number(counts[cacheKey] || 0) + 1
-    var policy = Ham.sotaGeoFailurePolicy(status, attempt)
-    if (policy.permanent) {
-      // A real 404/410 cannot become useful by polling it every three minutes.
-      // Keep a terminal sentinel for this shell session; a shell restart or a
-      // future spot carrying coordinates naturally gives the summit a new path.
-      storeSotaGeoCache(key, { missing: true })
-      return
-    }
-
-    counts[cacheKey] = attempt
-    var after = copyMap(sotaGeoRetryAfter)
-    after[cacheKey] = Date.now() + policy.retryMs
-    var order = sotaGeoRetryOrder.slice(0)
-    if (order.indexOf(cacheKey) < 0) order.push(cacheKey)
-    while (order.length > 512) {
-      var expired = order.shift()
-      delete after[expired]
-      delete counts[expired]
-    }
-    sotaGeoRetryCount = counts
-    sotaGeoRetryAfter = after
-    sotaGeoRetryOrder = order
-    if (policy.globalMs > 0) sotaGeoPauseUntilMs = Math.max(sotaGeoPauseUntilMs, Date.now() + policy.globalMs)
-  }
-
-  function applyCachedSotaGeo(s) {
-    if (!s || s.geoKey === "") return false
-    var cacheKey = "k:" + s.geoKey
-    if (!Object.prototype.hasOwnProperty.call(sotaGeoCache, cacheKey)) return false
-    var v = sotaGeoCache[cacheKey]
-    if (v && v.missing === true) return true
-    if (!v || !isFinite(v.lat) || !isFinite(v.lon)) return false
-    s.lat = Number(v.lat); s.lon = Number(v.lon)
-    return true
-  }
-
-  function applySotaGeoBatch() {
-    if (!sotaGeoDirty) return
-    var list = sotaSpots.slice(0)
-    var changed = false
-    for (var i = 0; i < list.length; i++) {
-      var beforeLat = Number(list[i].lat), beforeLon = Number(list[i].lon)
-      root.applyCachedSotaGeo(list[i])
-      if ((!isFinite(beforeLat) || !isFinite(beforeLon)) && isFinite(list[i].lat) && isFinite(list[i].lon)) changed = true
-    }
-    sotaGeoDirty = false
-    if (changed) sotaSpots = list
-  }
-
-  function scheduleNextSotaGeo(delayMs) {
-    if (!sotaGeoQueue.length || sotaGeoCurrent !== "" || sotaGeoProc.running) return
-    var delay = Math.max(1500, Number(delayMs) || 1500)
-    sotaGeoNextTimer.interval = Math.min(delay, 1800000)
-    sotaGeoNextTimer.restart()
-  }
-
-  function queueSotaGeo(list) {
-    if (!hasSite) return
-    var q = sotaGeoQueue.slice(0)
-    var now = Date.now()
-    for (var i = 0; i < (list || []).length; i++) {
-      var s = list[i]
-      if (!s || s.geoKey === "" || (isFinite(s.lat) && isFinite(s.lon)) || applyCachedSotaGeo(s)) continue
-      var retryAt = Number(sotaGeoRetryAfter["k:" + s.geoKey] || 0)
-      if (retryAt > now) continue
-      if (s.geoKey === sotaGeoCurrent || q.indexOf(s.geoKey) >= 0) continue
-      q.push(s.geoKey)
-    }
-    // Bounded and serialized: an initial global SOTA list must never turn into
-    // an unbounded fan-out against SOTA infrastructure.
-    sotaGeoQueue = q.slice(0, 32)
-    if (sotaGeoQueue.length && !sotaGeoProc.running && sotaGeoCurrent === "") {
-      var pause = Math.max(0, sotaGeoPauseUntilMs - now)
-      scheduleNextSotaGeo(pause)
-    }
-  }
-
-  function startNextSotaGeo() {
-    if (!hasSite || sotaGeoProc.running || sotaGeoCurrent !== "" || !sotaGeoQueue.length) return
-    var now = Date.now()
-    if (sotaGeoPauseUntilMs > now) { scheduleNextSotaGeo(sotaGeoPauseUntilMs - now); return }
-    var q = sotaGeoQueue.slice(0)
-    var key = String(q.shift() || "").toUpperCase().replace(/[^A-Z0-9\-\/]/g, "").slice(0, 24)
-    sotaGeoQueue = q
-    if (!/^[A-Z0-9]{1,8}\/[A-Z0-9]{1,8}-[0-9]{1,4}$/.test(key)) {
-      scheduleNextSotaGeo(1500); return
-    }
-    sotaGeoCurrent = key
-    sotaGeoStartedMs = now
-    sotaGeoExitSeen = false
-    sotaGeoStreamDone = false
-    sotaGeoExitCode = -1
-    sotaGeoStreamText = ""
-    sotaGeoCancelled = false
-    sotaGeoProc.command = sotaGeoFetchArgs(12, sotaSummitUrl + key)
-    sotaGeoProc.running = true
-  }
-
-  function tryFinishSotaGeo() {
-    if (sotaGeoCurrent === "" || !sotaGeoExitSeen || !sotaGeoStreamDone) return
-    var key = sotaGeoCurrent
-    var cancelled = sotaGeoCancelled
-    var exitCode = sotaGeoExitCode
-    var envelope = parseHttpEnvelope(sotaGeoStreamText)
-
-    // Clear the run identity exactly once before any cache/list assignment can
-    // trigger bindings.  onExited and streamFinished may arrive in either order.
-    sotaGeoCurrent = ""
-    sotaGeoStartedMs = 0
-    sotaGeoExitSeen = false
-    sotaGeoStreamDone = false
-    sotaGeoExitCode = -1
-    sotaGeoStreamText = ""
-    sotaGeoCancelled = false
-
-    if (!cancelled) {
-      if (exitCode === 0 && envelope.status >= 200 && envelope.status < 300) {
-        try {
-          var d = envelope.body === "" ? null : JSON.parse(envelope.body)
-          if (Array.isArray(d)) d = d.length ? d[0] : null
-          var lat = d ? parseFloat(String(d.latitude === null || d.latitude === undefined ? "" : d.latitude)) : NaN
-          var lon = d ? parseFloat(String(d.longitude === null || d.longitude === undefined ? "" : d.longitude)) : NaN
-          if (isFinite(lat) && isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-            storeSotaGeoCache(key, { lat: lat, lon: lon })
-            sotaGeoDirty = true
-            if (!sotaGeoFlushTimer.running) sotaGeoFlushTimer.start()
-          } else {
-            // A syntactically successful response with no usable coordinates is
-            // transient: do not convert an upstream schema hiccup into a session
-            // long negative cache.
-            rememberSotaGeoFailure(key, 502)
-          }
-        } catch (e) { rememberSotaGeoFailure(key, 502) }
-      } else {
-        rememberSotaGeoFailure(key, envelope.status || 0)
-      }
-    }
-
-    if (sotaGeoQueue.length) {
-      var pause = Math.max(0, sotaGeoPauseUntilMs - Date.now())
-      scheduleNextSotaGeo(pause)
-    }
-  }
-
   function refresh() {
     if (!solarProc.running) { loading = true; launch(0, fetchArgs(20, solarUrl)) }
     if (spotSource === "both" || spotSource === "pota") { if (!potaProc.running) launch(1, fetchArgs(20, potaUrl)) }
@@ -801,26 +584,7 @@ Panel {
     Qt.callLater(playForView)
     if (debugGeometry) geometryTimer.restart()
   }
-  onSpotSourceChanged: {
-    invalidate()
-    if (spotSource !== "both" && spotSource !== "sota") {
-      sotaGeoQueue = []
-      if (sotaGeoCurrent !== "") sotaGeoCancelled = true
-      if (sotaGeoProc.running) sotaGeoProc.running = false
-    }
-    refresh()
-  }
-
-  onHasSiteChanged: {
-    if (hasSite) {
-      queueSotaGeo(sotaSpots)
-    } else {
-      // Coordinates have no value without an operator position to measure from.
-      sotaGeoQueue = []
-      if (sotaGeoCurrent !== "") sotaGeoCancelled = true
-      if (sotaGeoProc.running) sotaGeoProc.running = false
-    }
-  }
+  onSpotSourceChanged: { invalidate(); refresh() }
 
   // The solar feed is regenerated roughly hourly; the spot feeds move
   // constantly but a bar widget does not need to see every one of them.
@@ -828,24 +592,6 @@ Panel {
   Timer { interval: 180000; running: true; repeat: true
           onTriggered: { if (root.spotSource !== "off") root.refresh() } }
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
-  // Summit enrichment is intentionally slower than the spot polling path: one
-  // request at a time, at most every 1.5s. Coordinate results are applied to the
-  // visible list in small batches so nearest-first ordering does not reshuffle
-  // beneath the pointer after every individual summit lookup.
-  Timer { id: sotaGeoNextTimer; interval: 1500; onTriggered: root.startNextSotaGeo() }
-  Timer { id: sotaGeoFlushTimer; interval: 5000; onTriggered: root.applySotaGeoBatch() }
-  Timer {
-    interval: 1000; running: true; repeat: true
-    onTriggered: {
-      if (sotaGeoProc.running && root.sotaGeoStartedMs
-          && Date.now() - root.sotaGeoStartedMs > 17000) {
-        // Do not finalize here. Setting running=false causes the normal exit and
-        // stream-finished signals; tryFinishSotaGeo() joins those exactly once.
-        sotaGeoProc.running = false
-      }
-    }
-  }
-
   // curl's --max-time is curl's own clock. This is an independent one. A killed
   // slot remains active until both process-exit and stdout-finished are observed.
   Timer {
@@ -940,32 +686,12 @@ Panel {
             var out = Ham.reconcileSotaSpots(arr)
             for (var i = 0; i < out.length; i++) {
               out[i].place = root.safe(out[i].place, 40)
-              root.applyCachedSotaGeo(out[i])
             }
             root.sotaSpots = out
             root.lastSotaSuccessMs = Date.now()
             root.sotaStale = false
-            root.queueSotaGeo(out)
           } catch (e) { root.sotaStale = true /* keep the previous list */ }
         } finally { root.guardedStreamFinished(2) }
-      }
-    }
-  }
-
-  Process {
-    id: sotaGeoProc
-    command: ["true"]
-    onExited: function (exitCode, exitStatus) {
-      root.sotaGeoExitCode = exitCode
-      root.sotaGeoExitSeen = true
-      root.tryFinishSotaGeo()
-    }
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.sotaGeoStreamText = String(text || "")
-        root.sotaGeoStreamDone = true
-        root.tryFinishSotaGeo()
       }
     }
   }

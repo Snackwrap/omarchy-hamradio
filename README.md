@@ -24,12 +24,11 @@ the location your Omarchy weather widget already knows.
   unmapped frequency), so `ALL BANDS` is exactly the union of the visible
   buckets. The list scrolls when it exceeds the popup. Filled row stripes are
   N0NBH Good/Fair/Poor grades; an outlined stripe means that band has no N0NBH
-  grade. POTA supplies park coordinates directly; SOTA uses the current spot
-  schema, reconciles TEST/QRT/superseded records, and resolves summit coordinates
-  from the official summit API with bounded serialized caching. Enrichment is
-  applied in batches so nearest-first ordering does not reshuffle after every
-  individual lookup. Click a row to open the corresponding POTA park or SOTA
-  summit page; repeated clicks on the same row are briefly debounced.
+  grade. Both feeds carry their own coordinates, so nothing has to be looked up
+  to place a spot; SOTA also reconciles TEST/QRT/superseded records, because its
+  feed is a recent-event stream rather than a list of who is on the air. Click a
+  row to open the corresponding POTA park or SOTA summit page; repeated clicks
+  on the same row are briefly debounced.
 - **Grey line** — today as a strip: night dark, day light, and the two grey-line
   windows picked out in amber, with a marker for now. Sunrise, sunset, and how
   long until the next window.
@@ -66,9 +65,9 @@ against itself:
 - Then, live: the real feed has to parse, the flux has to be plausible, every
   band grade has to be a word we know, and nearly every spotted frequency has to
   land in a band. Unmapped frequencies remain visible under `OTHER` rather than
-  disappearing from `ALL BANDS`. The live POTA check verifies usable coordinates;
-  the SOTA tests cover the current spot schema, TEST/QRT reconciliation, and one
-  live summit-detail coordinate lookup.
+  disappearing from `ALL BANDS`. Both live feed checks verify that
+  every spot arrives with usable coordinates, and the SOTA tests cover the
+  current spot schema and TEST/QRT reconciliation.
 
 ```bash
 node tools/test-ham.mjs            # includes the live checks
@@ -156,10 +155,9 @@ Everything here is fetched from the public internet and displayed, so:
   until both process exit and stdout completion have been observed.
 - A watchdog holds an independent deadline over every fetch, because
   `--max-time` is curl's own clock. The weather-file reader has its own deadline.
-- SOTA coordinate enrichment is serialized, bounded and cached by summit
-  reference. Invalid/missing summit responses are negatively cached for the
-  shell session; transient failures back off exponentially, and rate/auth/server
-  failures pause the queue so spot polling cannot fan out into repeated requests.
+- Distances are computed from coordinates the spot feeds already carry. There is
+  no per-spot lookup, so the number of requests does not grow with the number of
+  spots: three feeds, on a timer, and nothing else.
 - The location file is read through a bounded, time-limited reader rather than
   `FileView.text()`, which has no size cap and would block on a planted FIFO.
 
@@ -167,9 +165,8 @@ Everything here is fetched from the public internet and displayed, so:
 
 Band conditions and solar values come from **N0NBH** via
 [hamqsl.com](https://www.hamqsl.com/), spots from the
-[POTA](https://pota.app) and [SOTA](https://www.sota.org.uk) APIs. The SOTA
-integration uses approved read-only consumer access; users do not supply SOTA
-credentials or an API key.
+[POTA](https://pota.app) and [SOTA](https://www.sota.org.uk) APIs. None require
+a key or an account.
 
 Band condition grades are a model, not a measurement — the only way to know a
 band is open is to listen. Nothing here is a substitute for your own ears.

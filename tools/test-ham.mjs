@@ -230,11 +230,9 @@ const sota = H.normaliseSotaSpot({ activatorCallsign: "VK2IO/P", frequency: 7.14
 eq("SOTA MHz becomes the right band", sota.band, "40m")
 eq("a stroke in the callsign survives", sota.call, "VK2IO/P")
 eq("SOTA reference includes its association", sota.ref, "VK2/CT-001")
-eq("SOTA summit API path is retained", sota.geoKey, "VK2/CT-001")
 const sotaNew = H.normaliseSotaSpot({ activatorCallsign: "ZL/VK3BCM", frequency: 14.31, mode: "SSB",
                                       summitCode: "ZL1/AK-027", summitName: "Pukekohe Hill", type: null })
 eq("new SOTA schema carries the full summit reference", sotaNew.ref, "ZL1/AK-027")
-eq("new SOTA schema produces a summit lookup key", sotaNew.geoKey, "ZL1/AK-027")
 eq("SOTA QRT records retain their control type", H.normaliseSotaSpot({ activatorCallsign: "W1AW", summitCode: "W1/AA-001", type: "QRT" }).spotType, "QRT")
 eq("SOTA TEST records retain their control type", H.normaliseSotaSpot({ activatorCallsign: "W1AW", summitCode: "W1/AA-001", type: "TEST" }).spotType, "TEST")
 const reconciledSota = H.reconcileSotaSpots([
@@ -263,16 +261,6 @@ check("unknown locations keep no computed distance", !isFinite(byDistance[2].dis
 const movedStation = H.sortSpots(byDistance, { lat: 3, lon: 0 })
 check("changing station location refreshes cached presentation distance", movedStation.find(s => s.call === "far").distanceKm < movedStation.find(s => s.call === "near").distanceKm)
 
-const badSummit = H.sotaGeoFailurePolicy(400, 1)
-check("SOTA invalid summit request is terminal for the session", badSummit.permanent && badSummit.retryMs === 0)
-const missingSummit = H.sotaGeoFailurePolicy(404, 1)
-check("SOTA 404 is a terminal session miss", missingSummit.permanent && missingSummit.retryMs === 0)
-const rateLimited = H.sotaGeoFailurePolicy(429, 1)
-check("SOTA 429 pauses both key and queue", rateLimited.retryMs === 900000 && rateLimited.globalMs === 900000)
-const retry1 = H.sotaGeoFailurePolicy(500, 1)
-const retry3 = H.sotaGeoFailurePolicy(500, 3)
-check("transient SOTA failures back off exponentially", retry1.retryMs === 300000 && retry3.retryMs === 1200000)
-check("server failures pause queue fan-out", retry1.globalMs > 0)
 
 eq("age wording", H.formatAge(45), "45m")
 eq("age wording, hours", H.formatAge(90), "1h30m")
@@ -320,15 +308,14 @@ if (!process.argv.includes("--offline")) {
     const spots = await get("https://api-db2.sota.org.uk/api/spots/20/all/all")
     check("SOTA returned spots", Array.isArray(spots) && spots.length > 0, `${spots.length} spots`)
     const active = H.reconcileSotaSpots(spots)
-    const sample = active.find(s => s && s.geoKey)
     check("SOTA reconciliation yields active spots", active.length > 0, `${active.length} active`)
-    check("an active SOTA spot has an authoritative summit lookup key", !!sample, sample && sample.geoKey)
-    if (sample) {
-      const summit = await get("https://api-db2.sota.org.uk/api/summits/" + sample.geoKey)
-      check("SOTA summit lookup returns coordinates",
-            summit && isFinite(Number(summit.latitude)) && isFinite(Number(summit.longitude)),
-            summit && `${summit.latitude},${summit.longitude}`)
-    }
+    // The whole distance feature rests on this feed carrying coordinates itself.
+    // If that ever stops being true the spots simply lose their distance, and
+    // this check is how we find out rather than wondering why the column emptied.
+    const sotaLocated = active.filter(s => isFinite(s.lat) && isFinite(s.lon))
+    check("SOTA spots carry their own summit coordinates",
+          active.length > 0 && sotaLocated.length === active.length,
+          `${sotaLocated.length}/${active.length} located`)
   } catch (e) { console.log(`  skip  SOTA unavailable (${e.message})`) }
 }
 

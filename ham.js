@@ -393,8 +393,7 @@ function normalisePotaSpot(s, here) {
     ref: String(s.reference || "").toUpperCase().replace(/[^A-Z0-9\-]/g, "").slice(0, 12),
     place: String(s.parkName || s.name || ""),
     at: parseSpotTime(s.spotTime),
-    lat: lat, lon: lon,
-    geoKey: ""
+    lat: lat, lon: lon
   }
 }
 
@@ -431,11 +430,7 @@ function normaliseSotaSpot(s, here) {
     at: parseSpotTime(s.timeStamp),
     lat: lat, lon: lon,
     spotType: type,
-    epoch: String(s.epoch || "").replace(/[^A-Za-z0-9\-]/g, "").slice(0, 64),
-    // The official summit-detail API is /api/summits/{association}/{summit}.
-    // Keep only an allow-listed path shape so it is safe to append to that
-    // fixed HTTPS origin when the panel enriches a spot with coordinates.
-    geoKey: assoc !== "" && summit !== "" ? assoc + "/" + summit : ""
+    epoch: String(s.epoch || "").replace(/[^A-Za-z0-9\-]/g, "").slice(0, 64)
   }
 }
 
@@ -515,21 +510,6 @@ function sortSpots(spots, here) {
     return bt - at
   })
   return out
-}
-
-// Failure policy for the SOTA summit-coordinate enrichment path.  Invalid, missing or
-// retired summit requests are terminal for this shell session; transport/server errors
-// back off exponentially, while rate/auth failures also pause the whole queue
-// so one bad response cannot fan out across dozens of summit references.
-function sotaGeoFailurePolicy(status, attempt) {
-  var code = Number(status)
-  var n = Math.max(1, Math.min(8, Number(attempt) || 1))
-  if (code === 400 || code === 404 || code === 410 || code === 422) return { permanent: true, retryMs: 0, globalMs: 0 }
-  if (code === 401 || code === 403) return { permanent: false, retryMs: 1800000, globalMs: 1800000 }
-  if (code === 429) return { permanent: false, retryMs: 900000, globalMs: 900000 }
-  var retry = Math.min(3600000, 300000 * Math.pow(2, n - 1))
-  var global = (code === 0 || code === 408 || code >= 500) ? Math.min(retry, 300000) : 0
-  return { permanent: false, retryMs: retry, globalMs: global }
 }
 
 function minutesAgo(ms, nowMs) {
