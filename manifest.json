@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "com.leafbox.hamradio",
   "name": "Ham Radio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Robert (leafbox)",
   "license": "MIT",
   "homepage": "https://github.com/Snackwrap/omarchy-hamradio",

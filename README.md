@@ -19,13 +19,15 @@ the location your Omarchy weather widget already knows.
   flux, sunspot number, A and K, the X-ray class, foF2 and the signal-noise
   estimate.
 - **Spots** — live POTA and SOTA activations, nearest first from your locator,
-  each row coloured by what that band is doing right now, with source, place,
-  age, distance/bearing, band, frequency and mode. POTA supplies park
-  coordinates directly; SOTA summit coordinates are resolved from the official
-  summit API and cached in the running shell. Use the in-panel source/band chips
-  for temporary filtering, and click a row to open the corresponding POTA park
-  or SOTA summit page. The band is derived from the spotted frequency rather
-  than trusted from the feed.
+  with source, place, age, distance/bearing, band, frequency and mode. Band chips
+  are generated from the spots actually present (HF, VHF/UHF and `OTHER` for an
+  unmapped frequency), so `ALL BANDS` is exactly the union of the visible
+  buckets. The list scrolls when it exceeds the popup. Filled row stripes are
+  N0NBH Good/Fair/Poor grades; an outlined stripe means that band has no N0NBH
+  grade. POTA supplies park coordinates directly; SOTA uses the current spot
+  schema, reconciles TEST/QRT/superseded records, and resolves summit coordinates
+  from the official summit API with bounded serialized caching. Click a row to
+  open the corresponding POTA park or SOTA summit page.
 - **Grey line** — today as a strip: night dark, day light, and the two grey-line
   windows picked out in amber, with a marker for now. Sunrise, sunset, and how
   long until the next window.
@@ -61,11 +63,10 @@ against itself:
   must not become a number.
 - Then, live: the real feed has to parse, the flux has to be plausible, every
   band grade has to be a word we know, and nearly every spotted frequency has to
-  land in a band. Only *nearly* — operators mistype frequencies and the feed
-  passes them through, so a spot at 700.5 MHz is a fat finger rather than a band
-  we are missing, and refusing to map it is the right behaviour. The live POTA
-  check also verifies usable coordinates, and the SOTA check follows one live
-  spot through the official summit-detail endpoint and verifies its coordinates.
+  land in a band. Unmapped frequencies remain visible under `OTHER` rather than
+  disappearing from `ALL BANDS`. The live POTA check verifies usable coordinates;
+  the SOTA tests cover the current spot schema, TEST/QRT reconciliation, and one
+  live summit-detail coordinate lookup.
 
 ```bash
 node tools/test-ham.mjs            # includes the live checks
@@ -152,9 +153,9 @@ Everything here is fetched from the public internet and displayed, so:
   is discarded rather than accepted late.
 - A watchdog holds an independent deadline over every fetch, because
   `--max-time` is curl's own clock.
-- SOTA coordinate enrichment is serialized and cached by summit reference, so
-  a new summit is looked up once rather than producing a burst of repeat API
-  requests every time the spot list refreshes.
+- SOTA coordinate enrichment is serialized, bounded and cached by summit
+  reference. Failed lookups back off before retrying, so spot polling cannot fan
+  out into repeated summit requests.
 - The location file is read through a bounded, time-limited reader rather than
   `FileView.text()`, which has no size cap and would block on a planted FIFO.
 
@@ -162,8 +163,9 @@ Everything here is fetched from the public internet and displayed, so:
 
 Band conditions and solar values come from **N0NBH** via
 [hamqsl.com](https://www.hamqsl.com/), spots from the
-[POTA](https://pota.app) and [SOTA](https://www.sota.org.uk) APIs. None require
-a key.
+[POTA](https://pota.app) and [SOTA](https://www.sota.org.uk) APIs. The SOTA
+integration uses approved read-only consumer access; users do not supply SOTA
+credentials or an API key.
 
 Band condition grades are a model, not a measurement — the only way to know a
 band is open is to listen. Nothing here is a substitute for your own ears.

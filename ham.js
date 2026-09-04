@@ -403,6 +403,8 @@ function normaliseSotaSpot(s, here) {
   if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
     lat = NaN; lon = NaN
   }
+  var type = String(s.type || "NORMAL").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 12)
+  if (type === "") type = "NORMAL"
   return {
     source: "SOTA",
     call: call,
@@ -413,11 +415,53 @@ function normaliseSotaSpot(s, here) {
     place: String(s.summitName || s.summitDetails || ""),
     at: s.timeStamp ? Date.parse(String(s.timeStamp).replace(/Z?$/, "Z")) : NaN,
     lat: lat, lon: lon,
+    spotType: type,
+    epoch: String(s.epoch || "").replace(/[^A-Za-z0-9\-]/g, "").slice(0, 64),
     // The official summit-detail API is /api/summits/{association}/{summit}.
     // Keep only an allow-listed path shape so it is safe to append to that
     // fixed HTTPS origin when the panel enriches a spot with coordinates.
     geoKey: assoc !== "" && summit !== "" ? assoc + "/" + summit : ""
   }
+}
+
+// SOTA's current spot endpoint is a recent event stream, not a pre-reconciled
+// list of stations. TEST is not an activation. QRT is a tombstone for an older
+// spot from the same activator/summit; simply hiding the QRT row would let that
+// older spot reappear. Keep only the newest still-active record for each key.
+function reconcileSotaSpots(rows) {
+  var normalised = []
+  for (var i = 0; i < (rows || []).length; i++) {
+    var s = normaliseSotaSpot(rows[i])
+    if (s) normalised.push(s)
+  }
+  normalised.sort(function (a, b) {
+    var at = isFinite(a.at) ? a.at : 0
+    var bt = isFinite(b.at) ? b.at : 0
+    return bt - at
+  })
+
+  var closed = Object.create(null)
+  var seen = Object.create(null)
+  var out = []
+  for (var j = 0; j < normalised.length; j++) {
+    var spot = normalised[j]
+    var callKey = "c:" + spot.call
+    var exactKey = "r:" + spot.call + "|" + spot.ref
+    var key = spot.ref !== "" ? exactKey : callKey
+
+    if (spot.spotType === "TEST") continue
+    if (spot.spotType === "QRT") {
+      closed[key] = true
+      // A QRT without a usable summit reference still closes that activator's
+      // older entries; with a reference, do not hide an unrelated summit.
+      if (spot.ref === "") closed[callKey] = true
+      continue
+    }
+    if (closed[key] || closed[callKey] || seen[key]) continue
+    seen[key] = true
+    out.push(spot)
+  }
+  return out
 }
 
 // With a local position, nearest activation first.  Unknown coordinates sort
@@ -481,6 +525,39 @@ function gradeForBand(bands, bandName, isDay) {
     return isDay ? bands[i].day : bands[i].night
   }
   return ""
+}
+
+// Return exactly the band buckets represented by a spot collection, in band-
+// plan order. Unmapped/fat-finger frequencies are deliberately retained as an
+// explicit OTHER bucket so an ALL view can never contain invisible categories.
+function spotBandBuckets(spots) {
+  var counts = Object.create(null)
+  var unknown = 0
+  for (var i = 0; i < (spots || []).length; i++) {
+    var band = String(spots[i] && spots[i].band || "").toLowerCase()
+    if (band === "") { unknown += 1; continue }
+    counts[band] = (counts[band] || 0) + 1
+  }
+  var out = []
+  for (var j = 0; j < BANDS.length; j++) {
+    var key = BANDS[j].band.toLowerCase()
+    if (counts[key]) out.push({ band: BANDS[j].band, count: counts[key] })
+  }
+  // Future/new upstream bands still remain reachable even before BANDS learns
+  // their exact frequency edges.
+  var extras = []
+  for (var name in counts) {
+    if (!Object.prototype.hasOwnProperty.call(counts, name)) continue
+    var known = false
+    for (var k = 0; k < BANDS.length; k++) {
+      if (BANDS[k].band.toLowerCase() === name) { known = true; break }
+    }
+    if (!known) extras.push(name)
+  }
+  extras.sort()
+  for (var e = 0; e < extras.length; e++) out.push({ band: extras[e], count: counts[extras[e]] })
+  if (unknown) out.push({ band: "__other__", count: unknown })
+  return out
 }
 
 // The HF bands, in order, for anything that draws a frequency axis.

@@ -157,6 +157,12 @@ eq("...and ends at 10m", hf[hf.length - 1].band, "10m")
 check("6m is not in the HF list", hf.every(b => b.band !== "6m"))
 eq("a band knows its edges", H.bandSpan("20m").from + "-" + H.bandSpan("20m").to, "14000-14350")
 eq("an unknown band has none", H.bandSpan("nope"), null)
+const buckets = H.spotBandBuckets([
+  { band: "70cm" }, { band: "20m" }, { band: "70cm" }, { band: "" }, { band: "2m" }
+])
+eq("spot buckets follow band-plan order and keep OTHER", buckets.map(b => b.band + ":" + b.count).join(","),
+   "20m:1,2m:1,70cm:2,__other__:1")
+eq("spot bucket counts exactly cover ALL", buckets.reduce((n, b) => n + b.count, 0), 5)
 
 console.log("\n# what a disturbed field means")
 eq("quiet", H.geomagneticNote(1), "quiet")
@@ -211,6 +217,21 @@ eq("SOTA MHz becomes the right band", sota.band, "40m")
 eq("a stroke in the callsign survives", sota.call, "VK2IO/P")
 eq("SOTA reference includes its association", sota.ref, "VK2/CT-001")
 eq("SOTA summit API path is retained", sota.geoKey, "VK2/CT-001")
+const sotaNew = H.normaliseSotaSpot({ activatorCallsign: "ZL/VK3BCM", frequency: 14.31, mode: "SSB",
+                                      summitCode: "ZL1/AK-027", summitName: "Pukekohe Hill", type: null })
+eq("new SOTA schema carries the full summit reference", sotaNew.ref, "ZL1/AK-027")
+eq("new SOTA schema produces a summit lookup key", sotaNew.geoKey, "ZL1/AK-027")
+eq("SOTA QRT records retain their control type", H.normaliseSotaSpot({ activatorCallsign: "W1AW", summitCode: "W1/AA-001", type: "QRT" }).spotType, "QRT")
+eq("SOTA TEST records retain their control type", H.normaliseSotaSpot({ activatorCallsign: "W1AW", summitCode: "W1/AA-001", type: "TEST" }).spotType, "TEST")
+const reconciledSota = H.reconcileSotaSpots([
+  { activatorCallsign: "W1AW", summitCode: "W1/AA-001", frequency: 14.250, mode: "SSB", type: "QRT", timeStamp: "2026-09-03T20:05:00Z" },
+  { activatorCallsign: "W1AW", summitCode: "W1/AA-001", frequency: 14.250, mode: "SSB", type: null, timeStamp: "2026-09-03T20:00:00Z" },
+  { activatorCallsign: "N0CALL", summitCode: "W0C/FR-001", frequency: 7.032, mode: "CW", type: "TEST", timeStamp: "2026-09-03T20:04:00Z" },
+  { activatorCallsign: "K1ABC/P", summitCode: "W1/AM-001", frequency: 14.062, mode: "CW", type: null, timeStamp: "2026-09-03T20:03:00Z" },
+  { activatorCallsign: "K1ABC/P", summitCode: "W1/AM-001", frequency: 7.032, mode: "CW", type: "NORMAL", timeStamp: "2026-09-03T19:55:00Z" }
+])
+eq("QRT tombstones older spots and TEST is excluded", reconciledSota.map(s => s.call).join(","), "K1ABC/P")
+eq("only the newest active SOTA spot for a station/summit remains", reconciledSota[0].band, "20m")
 eq("the deprecated placeholder row is dropped", H.normaliseSotaSpot({ activatorCallsign: "DEPRECATED" }), null)
 eq("a spot with no callsign is dropped", H.normalisePotaSpot({ frequency: "7074" }), null)
 
@@ -229,7 +250,7 @@ if (!process.argv.includes("--offline")) {
   console.log("\n# live feeds")
   const get = async (url, asText) => {
     const r = await fetch(url, { signal: AbortSignal.timeout(15000),
-                                 headers: { "User-Agent": "omarchy-hamradio/0.1" } })
+                                 headers: { "User-Agent": "omarchy-hamradio/0.3" } })
     return asText ? await r.text() : await r.json()
   }
   try {
@@ -265,12 +286,14 @@ if (!process.argv.includes("--offline")) {
   } catch (e) { console.log(`  skip  POTA unavailable (${e.message})`) }
 
   try {
-    const spots = await get("https://api2.sota.org.uk/api/spots/20/all")
+    const spots = await get("https://api-db2.sota.org.uk/api/spots/20/all/all")
     check("SOTA returned spots", Array.isArray(spots) && spots.length > 0, `${spots.length} spots`)
-    const sample = spots.map(s => H.normaliseSotaSpot(s)).find(s => s && s.geoKey)
-    check("a SOTA spot has an authoritative summit lookup key", !!sample, sample && sample.geoKey)
+    const active = H.reconcileSotaSpots(spots)
+    const sample = active.find(s => s && s.geoKey)
+    check("SOTA reconciliation yields active spots", active.length > 0, `${active.length} active`)
+    check("an active SOTA spot has an authoritative summit lookup key", !!sample, sample && sample.geoKey)
     if (sample) {
-      const summit = await get("https://api2.sota.org.uk/api/summits/" + sample.geoKey)
+      const summit = await get("https://api-db2.sota.org.uk/api/summits/" + sample.geoKey)
       check("SOTA summit lookup returns coordinates",
             summit && isFinite(Number(summit.latitude)) && isFinite(Number(summit.longitude)),
             summit && `${summit.latitude},${summit.longitude}`)

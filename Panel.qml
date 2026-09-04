@@ -39,9 +39,9 @@ Panel {
 
   readonly property string solarUrl: "https://www.hamqsl.com/solarxml.php"
   readonly property string potaUrl: "https://api.pota.app/spot/activator"
-  readonly property string sotaUrl: "https://api2.sota.org.uk/api/spots/20/all"
-  readonly property string sotaSummitUrl: "https://api2.sota.org.uk/api/summits/"
-  readonly property string ua: "omarchy-hamradio/0.2"
+  readonly property string sotaUrl: "https://api-db2.sota.org.uk/api/spots/20/all/all"
+  readonly property string sotaSummitUrl: "https://api-db2.sota.org.uk/api/summits/"
+  readonly property string ua: "omarchy-hamradio/0.3"
 
   // ---- Settings ---------------------------------------------------------
   function boolSetting(name, dflt) { var v = setting(name, dflt); return v === true || v === "true" || v === 1 }
@@ -123,6 +123,14 @@ Panel {
   function boundedList(v, cap) {
     if (!v || !v.length) return []
     return v.length > cap ? v.slice(0, cap) : v
+  }
+
+  function copyMap(v) {
+    var out = {}
+    for (var k in (v || {})) {
+      if (Object.prototype.hasOwnProperty.call(v, k)) out[k] = v[k]
+    }
+    return out
   }
 
   // ---- Location ---------------------------------------------------------
@@ -221,6 +229,7 @@ Panel {
   // one at a time, and cache it for the lifetime of the shell.
   property var sotaGeoCache: ({})
   property var sotaGeoCacheOrder: []
+  property var sotaGeoRetryAfter: ({})
   property var sotaGeoQueue: []
   property string sotaGeoCurrent: ""
   property double sotaGeoStartedMs: 0
@@ -242,24 +251,44 @@ Panel {
     return Ham.sortSpots(all, hasSite ? { lat: siteLat, lon: siteLon } : null)
   }
 
+  readonly property var sourceSpots: {
+    if (spotUiSource === "all") return spots
+    var wantSource = spotUiSource.toUpperCase()
+    return spots.filter(function (s) { return String(s.source).toUpperCase() === wantSource })
+  }
+
   readonly property var displaySpots: {
-    var out = spots
-    if (spotUiSource !== "all") {
-      var wantSource = spotUiSource.toUpperCase()
-      out = out.filter(function (s) { return String(s.source).toUpperCase() === wantSource })
-    }
-    if (spotUiBand !== "") {
+    var out = sourceSpots
+    if (spotUiBand === "__other__") {
+      out = out.filter(function (s) { return String(s.band || "") === "" })
+    } else if (spotUiBand !== "") {
       var wantBand = spotUiBand.toLowerCase()
       out = out.filter(function (s) { return String(s.band).toLowerCase() === wantBand })
     }
     return out
   }
 
+  // The quick band row is derived from the spots that can actually be shown
+  // for the selected source.  That makes ALL exactly the union of the visible
+  // buckets instead of silently meaning "HF plus everything else".  Anything
+  // outside the known band plan remains reachable through OTHER.
   readonly property var spotBandOptions: {
-    var out = [{ band: "", label: "ALL" }]
-    var hf = Ham.hfBands()
-    for (var i = 0; i < hf.length; i++) out.push({ band: hf[i].band, label: hf[i].band })
+    var buckets = Ham.spotBandBuckets(sourceSpots)
+    var out = [{ band: "", label: "ALL BANDS", count: sourceSpots.length }]
+    for (var i = 0; i < buckets.length; i++) {
+      var band = buckets[i].band
+      out.push({ band: band, label: band === "__other__" ? "OTHER" : band, count: buckets[i].count })
+    }
     return out
+  }
+
+
+  onSpotBandOptionsChanged: {
+    if (spotUiBand === "") return
+    for (var i = 0; i < spotBandOptions.length; i++) {
+      if (spotBandOptions[i].band === spotUiBand) return
+    }
+    spotUiBand = ""
   }
 
   readonly property int visiblePotaCount: spots.filter(function (s) { return s.source === "POTA" }).length
@@ -322,8 +351,33 @@ Panel {
 
   function openSpot(s) {
     var url = spotUrl(s)
-    if (url ==="") return
+    if (url === "") return
+    // xdg-open may stay alive while a cold browser starts.  A tracked Process
+    // would then make later clicks look "busy" and drop them, so URL launches
+    // are deliberately independent fire-and-forget processes.
     Quickshell.execDetached(["xdg-open", url])
+  }
+
+  function setSpotSourceFilter(value) {
+    spotUiSource = value
+    spotUiBand = ""
+    Qt.callLater(function () { if (spotList) spotList.positionViewAtBeginning() })
+  }
+
+  function setSpotBandFilter(value) {
+    spotUiBand = value
+    Qt.callLater(function () { if (spotList) spotList.positionViewAtBeginning() })
+  }
+
+  function spotGrade(s) {
+    return Ham.gradeForBand(solar ? solar.bands : [], s ? s.band : "", isDay)
+  }
+
+  function scrollSpotRows(rows) {
+    if (!spotList || !spotList.visible || spotList.contentHeight <= spotList.height) return
+    var maxY = Math.max(0, spotList.contentHeight - spotList.height)
+    var nextY = spotList.contentY + Number(rows) * Style.space(34)
+    spotList.contentY = Math.max(0, Math.min(maxY, nextY))
   }
 
   function spotFreshness() {
@@ -488,13 +542,18 @@ Panel {
 
   function queueSotaGeo(list) {
     var q = sotaGeoQueue.slice(0)
+    var now = Date.now()
     for (var i = 0; i < (list || []).length; i++) {
       var s = list[i]
       if (!s || s.geoKey === "" || (isFinite(s.lat) && isFinite(s.lon)) || applyCachedSotaGeo(s)) continue
+      var retryAt = Number(sotaGeoRetryAfter["k:" + s.geoKey] || 0)
+      if (retryAt > now) continue
       if (s.geoKey === sotaGeoCurrent || q.indexOf(s.geoKey) >= 0) continue
       q.push(s.geoKey)
     }
-    sotaGeoQueue = q.slice(0, 64)
+    // Bounded and serialized: an initial global SOTA list must never turn into
+    // an unbounded fan-out against SOTA infrastructure.
+    sotaGeoQueue = q.slice(0, 32)
     if (!sotaGeoProc.running && sotaGeoCurrent === "") sotaGeoNextTimer.restart()
   }
 
@@ -513,6 +572,15 @@ Panel {
   }
 
   function finishSotaGeo() {
+    var key = sotaGeoCurrent
+    if (key !== "" && !sotaGeoCache["k:" + key]) {
+      // A transient failure should not be retried for the same summit every
+      // three-minute spot refresh. Five minutes is long enough to back off but
+      // short enough to recover while an activation is still likely live.
+      var retry = copyMap(sotaGeoRetryAfter)
+      retry["k:" + key] = Date.now() + 300000
+      sotaGeoRetryAfter = retry
+    }
     sotaGeoStartedMs = 0
     sotaGeoCurrent = ""
     if (sotaGeoQueue.length) sotaGeoNextTimer.restart()
@@ -547,7 +615,9 @@ Panel {
   Timer { interval: 180000; running: true; repeat: true
           onTriggered: { if (root.spotSource !== "off") root.refresh() } }
   Timer { interval: 1000; running: true; repeat: true; onTriggered: root.nowMs = Date.now() }
-  Timer { id: sotaGeoNextTimer; interval: 750; onTriggered: root.startNextSotaGeo() }
+  // Summit enrichment is intentionally slower than the spot polling path: one
+  // request at a time, at most every 1.5s, with positive and negative caches.
+  Timer { id: sotaGeoNextTimer; interval: 1500; onTriggered: root.startNextSotaGeo() }
   Timer {
     interval: 1000; running: true; repeat: true
     onTriggered: {
@@ -636,14 +706,10 @@ Panel {
           var arr = root.parseBounded(text)
           if (!arr || !Array.isArray(arr)) { root.sotaStale = true; return }
           arr = root.boundedList(arr, 120)
-          var out = []
-          for (var i = 0; i < arr.length; i++) {
-            var s = Ham.normaliseSotaSpot(arr[i])
-            if (s) {
-              s.place = root.safe(s.place, 40)
-              root.applyCachedSotaGeo(s)
-              out.push(s)
-            }
+          var out = Ham.reconcileSotaSpots(arr)
+          for (var i = 0; i < out.length; i++) {
+            out[i].place = root.safe(out[i].place, 40)
+            root.applyCachedSotaGeo(out[i])
           }
           root.sotaSpots = out
           root.lastSotaSuccessMs = Date.now()
@@ -657,7 +723,7 @@ Panel {
   Process {
     id: sotaGeoProc
     command: ["true"]
-    onExited: root.finishSotaGeo()
+    onExited: Qt.callLater(root.finishSotaGeo)
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -670,7 +736,7 @@ Panel {
           var lat = parseFloat(String(d.latitude === null || d.latitude === undefined ? "" : d.latitude))
           var lon = parseFloat(String(d.longitude === null || d.longitude === undefined ? "" : d.longitude))
           if (!isFinite(lat) || !isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return
-          var cache = root.sotaGeoCache
+          var cache = root.copyMap(root.sotaGeoCache)
           var order = root.sotaGeoCacheOrder.slice(0)
           var cacheKey = "k:" + key
           if (!cache[cacheKey]) order.push(cacheKey)
@@ -681,6 +747,9 @@ Panel {
           cache[cacheKey] = { lat: lat, lon: lon }
           root.sotaGeoCache = cache
           root.sotaGeoCacheOrder = order
+          var retry = root.copyMap(root.sotaGeoRetryAfter)
+          delete retry[cacheKey]
+          root.sotaGeoRetryAfter = retry
           var list = root.sotaSpots.slice(0)
           for (var i = 0; i < list.length; i++) {
             if (list[i].geoKey === key) { list[i].lat = lat; list[i].lon = lon }
@@ -761,6 +830,9 @@ Panel {
       Component.onCompleted: root.panelFrame = keyCatcher
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
+      onMoveRequested: function (dx, dy) {
+        if (root.view === "spots" && dy !== 0) root.scrollSpotRows(dy)
+      }
 
       Column {
         id: content
@@ -1017,9 +1089,21 @@ Panel {
             height: implicitHeight
             spacing: Style.space(5)
 
-            FilterChip { label: "ALL"; selected: root.spotUiSource === "all"; onClicked: root.spotUiSource = "all" }
-            FilterChip { label: "POTA"; selected: root.spotUiSource === "pota"; onClicked: root.spotUiSource = "pota" }
-            FilterChip { label: "SOTA"; selected: root.spotUiSource === "sota"; onClicked: root.spotUiSource = "sota" }
+            FilterChip {
+              label: "ALL " + root.spots.length
+              selected: root.spotUiSource === "all"
+              onClicked: root.setSpotSourceFilter("all")
+            }
+            FilterChip {
+              label: "POTA " + root.visiblePotaCount
+              selected: root.spotUiSource === "pota"
+              onClicked: root.setSpotSourceFilter("pota")
+            }
+            FilterChip {
+              label: "SOTA " + root.visibleSotaCount
+              selected: root.spotUiSource === "sota"
+              onClicked: root.setSpotSourceFilter("sota")
+            }
           }
 
           Flow {
@@ -1030,11 +1114,25 @@ Panel {
               model: root.spotBandOptions
               FilterChip {
                 required property var modelData
-                label: modelData.label
+                label: modelData.label + " " + modelData.count
                 selected: root.spotUiBand === modelData.band
-                onClicked: root.spotUiBand = modelData.band
+                onClicked: root.setSpotBandFilter(modelData.band)
               }
             }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.displaySpots.some(function (s) { return root.spotGrade(s) === "" })
+            width: parent.width
+            text: root.solar
+              ? "Outlined stripe = no N0NBH propagation grade for that band"
+              : "Outlined stripe = propagation grade not loaded"
+            color: Color.muted
+            opacity: 0.72
+            font.family: Style.font.family
+            font.pixelSize: Style.space(9)
+            elide: Text.ElideRight
           }
 
           Text {
@@ -1054,108 +1152,142 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          Repeater {
-            model: root.displaySpots.slice(0, 14)
-            Item {
-              id: sp
-              required property var modelData
-              width: parent ? parent.width : 0
-              height: Style.space(34)
+          Item {
+            id: spotListFrame
+            width: parent.width
+            visible: root.displaySpots.length > 0
+            readonly property real rowHeight: Style.space(34)
+            readonly property real maxHeight: Math.max(
+              Style.space(102),
+              Math.min(Style.space(374), panel.availableCardHeight > 0 ? panel.availableCardHeight * 0.50 : Style.space(374)))
+            height: visible ? Math.min(root.displaySpots.length * rowHeight, maxHeight) : 0
 
-              Rectangle {
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(3)
-                height: Style.space(26)
-                radius: Style.space(2)
-                // The colour of the band's current grade, so the list says
-                // whether a spot is workable without a trip to the Bands tab.
-                // A band with no published forecast stays neutral.
-                color: {
-                  var g = Ham.gradeForBand(root.solar ? root.solar.bands : [],
-                                           sp.modelData.band, root.isDay)
-                  return g !== "" ? root.gradeFor(g) : Color.muted
+            ListView {
+              id: spotList
+              anchors.fill: parent
+              anchors.rightMargin: scrollThumb.visible ? Style.space(6) : 0
+              clip: true
+              model: root.displaySpots
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+              cacheBuffer: Math.max(height, Style.space(340))
+
+              delegate: Item {
+                id: sp
+                required property var modelData
+                width: ListView.view ? ListView.view.width : 0
+                height: spotListFrame.rowHeight
+                readonly property string rowGrade: root.spotGrade(modelData)
+
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(3)
+                  height: Style.space(26)
+                  radius: Style.space(2)
+                  // Filled Good/Fair/Poor means N0NBH actually grades this band.
+                  // An outline is deliberately different from "Poor": it means
+                  // there is no published N0NBH grade (e.g. 160m, 60m, VHF/UHF).
+                  color: sp.rowGrade !== "" ? root.gradeFor(sp.rowGrade) : "transparent"
+                  border.width: sp.rowGrade === "" ? 1 : 0
+                  border.color: Color.muted
+                  opacity: sp.rowGrade !== "" ? 0.85 : 0.70
                 }
-                opacity: 0.85
-              }
 
-              Column {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.space(10)
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(1)
+                Column {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(10)
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(1)
 
-                Row {
-                  width: parent.width
-                  spacing: Style.space(7)
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(7)
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(82)
+                      text: root.safe(sp.modelData.call, 16)
+                      color: Color.popups.text
+                      font.family: Style.font.family
+                      font.pixelSize: Style.space(12)
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(38)
+                      text: sp.modelData.band ? root.safe(sp.modelData.band, 6) : "OTHER"
+                      color: Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.space(11)
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(58)
+                      text: Ham.formatFreq(sp.modelData.freq)
+                      color: Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.space(11)
+                      horizontalAlignment: Text.AlignRight
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Style.space(40)
+                      text: root.safe(sp.modelData.mode, 6)
+                      color: Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.space(11)
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      width: Math.max(Style.space(30), parent.width - Style.space(240))
+                      text: root.distanceText(sp.modelData)
+                      color: Color.muted
+                      font.family: Style.font.family
+                      font.pixelSize: Style.space(10)
+                      horizontalAlignment: Text.AlignRight
+                      elide: Text.ElideRight
+                    }
+                  }
+
                   Text {
                     textFormat: Text.PlainText
-                    width: Style.space(82)
-                    text: root.safe(sp.modelData.call, 16)
-                    color: Color.popups.text
+                    width: parent.width
+                    text: root.safe(sp.modelData.source, 6) + " " + root.safe(sp.modelData.ref, 20)
+                      + (sp.modelData.place ? "  ·  " + root.safe(sp.modelData.place, 40) : "")
+                      + (root.ageText(sp.modelData.at) ? "  ·  " + root.ageText(sp.modelData.at) : "")
+                    color: Color.muted
+                    opacity: 0.78
                     font.family: Style.font.family
-                    font.pixelSize: Style.space(12)
-                    font.bold: true
+                    font.pixelSize: Style.space(9)
                     elide: Text.ElideRight
                   }
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(38)
-                    text: root.safe(sp.modelData.band, 6)
-                    color: Color.muted
-                    font.family: Style.font.family
-                    font.pixelSize: Style.space(11)
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(58)
-                    text: Ham.formatFreq(sp.modelData.freq)
-                    color: Color.muted
-                    font.family: Style.font.family
-                    font.pixelSize: Style.space(11)
-                    horizontalAlignment: Text.AlignRight
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Style.space(40)
-                    text: root.safe(sp.modelData.mode, 6)
-                    color: Color.muted
-                    font.family: Style.font.family
-                    font.pixelSize: Style.space(11)
-                  }
-                  Text {
-                    textFormat: Text.PlainText
-                    width: Math.max(Style.space(30), parent.width - Style.space(240))
-                    text: root.distanceText(sp.modelData)
-                    color: Color.muted
-                    font.family: Style.font.family
-                    font.pixelSize: Style.space(10)
-                    horizontalAlignment: Text.AlignRight
-                    elide: Text.ElideRight
-                  }
                 }
 
-                Text {
-                  textFormat: Text.PlainText
-                  width: parent.width
-                  text: root.safe(sp.modelData.source, 6) + " " + root.safe(sp.modelData.ref, 20)
-                    + (sp.modelData.place ? "  ·  " + root.safe(sp.modelData.place, 40) : "")
-                    + (root.ageText(sp.modelData.at) ? "  ·  " + root.ageText(sp.modelData.at) : "")
-                  color: Color.muted
-                  opacity: 0.78
-                  font.family: Style.font.family
-                  font.pixelSize: Style.space(9)
-                  elide: Text.ElideRight
+                MouseArea {
+                  anchors.fill: parent
+                  enabled: root.spotUrl(sp.modelData) !== ""
+                  cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                  onClicked: root.openSpot(sp.modelData)
                 }
               }
+            }
 
-              MouseArea {
-                anchors.fill: parent
-                enabled: root.spotUrl(sp.modelData) !== ""
-                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onClicked: root.openSpot(sp.modelData)
-              }
+            // Tiny compositor-native scroll indicator without pulling in a
+            // QtQuick.Controls style just for one scrollbar.
+            Rectangle {
+              id: scrollThumb
+              anchors.right: parent.right
+              width: Style.space(2)
+              radius: width / 2
+              visible: spotList.contentHeight > spotList.height + 1
+              color: Color.muted
+              opacity: 0.45
+              height: visible ? Math.max(Style.space(18), spotList.height * spotList.height / spotList.contentHeight) : 0
+              y: visible && spotList.contentHeight > spotList.height
+                ? (spotList.contentY / (spotList.contentHeight - spotList.height)) * (spotList.height - height)
+                : 0
             }
           }
         }
